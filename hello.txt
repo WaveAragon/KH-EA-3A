@@ -1,0 +1,16 @@
+python3 -m venv .venv
+#creer l'environnement virtuel
+
+source .venv/bin/activate 
+#lancer le .venv, mettre && entre les deux premieres commandes
+
+which python 
+#pour vérifier qu'on est bien dans le .venv
+which python3 
+#dans le cas ou on est toujours dans le python de Homebrew
+
+python -m pip install speasy scipy matplotlib
+#librairies installees
+
+ipython
+#lance la console IPython amelioree
