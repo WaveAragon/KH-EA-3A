@@ -7,6 +7,17 @@ from scipy.ndimage import uniform_filter1d
 
 deb = "2014-1-31 09:19"
 fin = "2014-1-31 09:29"
+mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
+
+def print_mes_mag(mes_mag_test):
+    '''
+    pour avoir de la visibilité sur les données extractables avec speazy :
+    '''
+    print("type =", type(mes_mag_test), "\ncolonnes=", mes_mag_test.columns, "\nunit=", mes_mag_test.unit)
+    print("time dtype =", mes_mag_test.time.dtype)
+    print("values dtype =", mes_mag_test.values.dtype)
+    print("values shape =", mes_mag_test.values.shape)
+    print("meta =", mes_mag_test.meta)
 
 
 '''
@@ -21,7 +32,9 @@ def mag(date_debut, date_fin):
     #Récupération des données
     
     mes_mag = spz.get_data('amda/mes_b_orbmso', date_debut, date_fin)
-
+    if mes_mag is None:
+        raise ValueError(f"Aucune donnée AMDA recuperee entre {date_debut} et {date_fin}")
+ 
     t = mes_mag.time
     B = mes_mag.values
     norm = np.linalg.norm(B, axis=1)
@@ -77,7 +90,9 @@ def psd_mag(date_debut, date_fin):
     # ==================================================
 
     mes_mag = spz.get_data('amda/mes_b_orbmso', date_debut, date_fin)
-
+    if mes_mag is None:
+        raise ValueError(f"Aucune donnée AMDA recuperee entre {date_debut} et {date_fin}")
+ 
     B = mes_mag.values
 
     # ==================================================
@@ -212,6 +227,7 @@ def psd_mag(date_debut, date_fin):
 
 
 
-
+'''Fonctions à lancer'''
 #mag(deb, fin)
-psd_mag(deb, fin)
+#psd_mag(deb, fin)
+print_mes_mag(mes_mag_test)

@@ -1,4 +1,4 @@
-
+"commenter une ligne : cmd + maj + /"
 
 from datetime import datetime
 
