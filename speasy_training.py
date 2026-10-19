@@ -94,16 +94,17 @@ def psd_mag(date_debut, date_fin):
         B_det[:, k] = B[:, k] - trend
 
     # ==================================================
-    # Champ moyen
+    # Nouveau système d'axes
     # ==================================================
 
+    #n3
     B_mean = np.mean(B, axis=0)
-
     n3 = B_mean / np.linalg.norm(B_mean)
 
     # Axe YMSO
     YMSO = np.array([0.0, 1.0, 0.0])
 
+    #n1
     n1 = np.cross(n3, YMSO)
 
     if np.linalg.norm(n1) < 1e-12:
@@ -113,6 +114,7 @@ def psd_mag(date_debut, date_fin):
 
     n1 /= np.linalg.norm(n1)
 
+    #n2
     n2 = np.cross(n3, n1)
     n2 /= np.linalg.norm(n2)
 
@@ -205,7 +207,7 @@ def psd_mag(date_debut, date_fin):
     )
 
     plt.legend()
-
+    #plt.xlim(5e-3, f[-1])
     plt.tight_layout()
     plt.show()
 
