@@ -12,6 +12,9 @@ deb = "2014-1-31 09:19"
 fin = "2014-1-31 09:29"
 mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
 
+mes_xyz_test = spz.get_data('amda/mes_xyz_orbmso', deb, fin)
+
+
 # Ions dont on peut tracer la fréquence cyclotron : (nombre de masse, charge)
 IONS = {"H+": (1, 1), "He2+": (4, 2), "O+": (16, 1), "Na+": (23, 1)}
 COULEURS_IONS = {"H+": "dimgray", "He2+": "goldenrod", "O+": "steelblue", "Na+": "#eb6834"}
@@ -439,7 +442,9 @@ def spectro_mag(date_debut, date_fin, duree_fen=300, pas=30, fmax=0.1, ion="Na+"
 '''Fonctions à lancer'''
 #mag(deb, fin)
 #psd_mag(deb, fin)
-spectro_mag("2014-1-31 09:09", "2014-1-31 09:39")
+#spectro_mag("2014-1-31 09:09", "2014-1-31 09:39")
 #print_mes_mag(mes_mag_test)
-#print("serie temporelle :\n", mes_mag_test.time, "\n")
-#print("série magnétique :\n", mes_mag_test.values)
+#print("serie temporelle :\n", mes_xyz_test.time, "\n")
+#print("série position :\n", mes_xyz_test.values)
+#print_mes_mag(mes_xyz_test)
+print(mes_xyz_test.units)
