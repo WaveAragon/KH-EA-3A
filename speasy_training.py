@@ -7,21 +7,34 @@ from scipy.ndimage import uniform_filter1d
 
 deb = "2014-1-31 09:19"
 fin = "2014-1-31 09:29"
+mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
+
+def print_mes_mag(mes_mag):
+    '''
+    pour avoir de la visibilité sur les données extractables avec speazy :
+    '''
+    print("type =", type(mes_mag), "\ncolonnes=", mes_mag.columns, "\nunit=", mes_mag.unit)
+    print("time dtype =", mes_mag.time.dtype)
+    print("values dtype =", mes_mag.values.dtype)
+    print("values shape =", mes_mag.values.shape)
+    print("meta =", mes_mag.meta)
 
 
-'''
-En entrée :
- - une date de début au format string "YYYY-MM-DD HH:mm"
- - une date de fin au format string   "YYYY-MM-DD HH:mm"
 
-Affiche l'évolution de Bx, By et Bz entre les dates de début et de fin, ainsi que |B|
-'''
 def mag(date_debut, date_fin):
-    
+    '''
+    En entrée :
+     - une date de début au format string "YYYY-MM-DD HH:mm"
+     - une date de fin au format string   "YYYY-MM-DD HH:mm"
+
+    Affiche l'évolution de Bx, By et Bz entre les dates de début et de fin, ainsi que |B|
+    ''' 
     #Récupération des données
     
     mes_mag = spz.get_data('amda/mes_b_orbmso', date_debut, date_fin)
-
+    if mes_mag is None:
+        raise ValueError(f"Aucune donnée AMDA recuperee entre {date_debut} et {date_fin}")
+ 
     t = mes_mag.time
     B = mes_mag.values
     norm = np.linalg.norm(B, axis=1)
@@ -65,7 +78,7 @@ def psd_mag(date_debut, date_fin):
       - PSD parallèle au champ moyen
       - PSD perpendiculaire au champ moyen
 
-    Méthode inspirée de Boardsen et al. :
+    Méthode :
       - detrending polynomial d'ordre 2
       - repère local (n1,n2,n3)
       - FFT directe
@@ -77,7 +90,9 @@ def psd_mag(date_debut, date_fin):
     # ==================================================
 
     mes_mag = spz.get_data('amda/mes_b_orbmso', date_debut, date_fin)
-
+    if mes_mag is None:
+        raise ValueError(f"Aucune donnée AMDA recuperee entre {date_debut} et {date_fin}")
+ 
     B = mes_mag.values
 
     # ==================================================
@@ -159,7 +174,7 @@ def psd_mag(date_debut, date_fin):
     # PSD parallèle et perpendiculaire
     # ==================================================
 
-    PSD_perp = 0.5 * (PSD1 + PSD2)
+    PSD_perp = PSD1 + PSD2
     PSD_para = PSD3
 
     # ==================================================
@@ -211,9 +226,32 @@ def psd_mag(date_debut, date_fin):
     plt.tight_layout()
     plt.show()
 
+def cyclo(nb_atomique, B_moy, charge=1):
+    """
+    Calcul de la fréquence cyclotron d'un ion dans un champ magnétique
+
+    Paramètres :
+      - nb_atomique : nombre atomique de l'ion (ex: 1 pour H+, 4 pour He++)
+      - B_moy : champ magnétique moyen en nT
+      - charge : charge de l'ion (par défaut 1)
+    """
+    # Constantes
+    e = 1.602176634e-19  # Charge élémentaire en C
+    m_p = 1.67262192369e-27  # Masse du proton en kg
+
+    # Masse de l'ion
+    m_ion = nb_atomique * m_p
+
+    # Conversion du champ magnétique de nT à T
+    B_moy_T = B_moy * 1e-9
+
+    # Calcul de la fréquence cyclotron en Hz
+    f_cyclo = (charge * e * B_moy_T) / (2 * np.pi * m_ion)
+
+    return f_cyclo
 
 
-
-
-#mag(deb, fin)
+'''Fonctions à lancer'''
+mag(deb, fin)
 psd_mag(deb, fin)
+#print_mes_mag(mes_mag_test)

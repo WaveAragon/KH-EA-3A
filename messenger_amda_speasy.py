@@ -1,4 +1,5 @@
 """
+Claude V1-Arthur
 Point de départ speasy + AMDA pour les données MAG de MESSENGER.
 
 Prérequis : Python >= 3.10
