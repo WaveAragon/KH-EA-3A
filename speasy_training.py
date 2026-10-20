@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import speasy as spz
 from scipy.ndimage import uniform_filter1d
+from events import events
 
 
 deb = "2014-1-31 09:19"
