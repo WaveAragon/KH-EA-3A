@@ -175,7 +175,8 @@ def psd_mag(date_debut, date_fin, ions=("Na+", "H+"), fenetre=None, zoom_lin=0.2
     B_abs_moy, B_abs_std = B_abs.mean(), B_abs.std()
 
     # ==================================================
-    # Projection dans le repère local
+    # Projection dans le repère local nouvellement établi
+    # (produit matriciel pour se placer dans le repère local)
     # ==================================================
 
     B1 = B_det @ n1
@@ -188,7 +189,7 @@ def psd_mag(date_debut, date_fin, ions=("Na+", "H+"), fenetre=None, zoom_lin=0.2
 
     fs = 20.0  # Hz
 
-    N = len(B1)
+    N = len(B1) # nombre d'échantillons
 
     # Fenêtre d'apodisation (rectangulaire par défaut : np.sum(w**2) = N)
     w = np.ones(N) if fenetre is None else get_window(fenetre, N)
@@ -373,7 +374,7 @@ def spectro_mag(date_debut, date_fin, duree_fen=300, pas=30, fmax=0.1, ion="Na+"
 
     # Grille de fréquences commune : multiples de 1/duree_fen jusqu'à fmax
     f_ref = np.arange(1, int(fmax * duree_fen) + 1) / duree_fen
-    debuts = np.arange(0, ts[-1] - duree_fen, pas)
+    debuts = np.arange(0, ts[-1] - duree_fen, pas) #??????
     P_perp, pola, deg_pola = [], [], []
 
     for d in debuts:
@@ -437,6 +438,8 @@ def spectro_mag(date_debut, date_fin, duree_fen=300, pas=30, fmax=0.1, ion="Na+"
 
 '''Fonctions à lancer'''
 #mag(deb, fin)
-psd_mag(deb, fin)
-#spectro_mag("2014-1-31 09:09", "2014-1-31 09:39")
+#psd_mag(deb, fin)
+spectro_mag("2014-1-31 09:09", "2014-1-31 09:39")
 #print_mes_mag(mes_mag_test)
+#print("serie temporelle :\n", mes_mag_test.time, "\n")
+#print("série magnétique :\n", mes_mag_test.values)
