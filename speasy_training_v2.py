@@ -6,7 +6,9 @@ from scipy.ndimage import uniform_filter1d
 from scipy.signal import get_window
 from scipy.stats import chi2
 from matplotlib.colors import LogNorm
-from events import events
+from events import events_Sundberg
+from events import events_Gershman_A1
+from events import events_Gershman_A2
 
 
 deb = "2014-1-31 09:19"
