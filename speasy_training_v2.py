@@ -6,9 +6,6 @@ from scipy.ndimage import uniform_filter1d
 from scipy.signal import get_window
 from scipy.stats import chi2
 from matplotlib.colors import LogNorm
-from events import events_Sundberg
-from events import events_Gershman_A1
-from events import events_Gershman_A2
 
 
 deb = "2014-1-31 09:19"
@@ -16,7 +13,8 @@ fin = "2014-1-31 09:29"
 mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
 
 mes_xyz_test = spz.get_data('amda/mes_xyz_orbmso', deb, fin)
-
+positions = mes_xyz_test.values
+temps_s = (mes_xyz_test.time - mes_xyz_test.time[0]) / np.timedelta64(1, "s")  # temps en secondes depuis le début de l'intervalle
 
 # Ions dont on peut tracer la fréquence cyclotron : (nombre de masse, charge)
 IONS = {"H+": (1, 1), "He2+": (4, 2), "O+": (16, 1), "Na+": (23, 1)}
@@ -441,6 +439,69 @@ def spectro_mag(date_debut, date_fin, duree_fen=300, pas=30, fmax=0.1, ion="Na+"
     axs[2, 0].set_xlabel("UTC")
     plt.show()
 
+def orbite_3d(coords, valeurs=None, label_valeurs="", magnetopause=True, titre=""):
+    """
+    Trajectoire 3D autour de Mercure, orientable à la souris (cliquer-glisser),
+    zoom avec clic droit-glisser.
+
+    En entrée :
+      - coords        : liste ou tableau (N, 3) de positions (X, Y, Z) en rayons de Mercure,
+                        repère MSO (X vers le Soleil, Z vers le nord)
+      - valeurs       : optionnel, N valeurs pour colorer la trajectoire (temps, |B|, ...)
+      - label_valeurs : légende de la barre de couleur
+      - magnetopause  : trace la magnétopause moyenne de Winslow et al. (2013)
+      - titre         : titre de la figure
+    """
+    P = np.asarray(coords, dtype=float)
+    x, y, z = P[:, 0], P[:, 1], P[:, 2]
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(projection="3d")
+
+    # Mercure : hémisphère jour (X > 0) clair, hémisphère nuit sombre
+    u, v = np.meshgrid(np.linspace(0, 2 * np.pi, 60), np.linspace(0, np.pi, 30))
+    xs, ys, zs = np.cos(u) * np.sin(v), np.sin(u) * np.sin(v), np.cos(v)
+    couleurs = np.where(xs[..., None] > 0, [0.85, 0.65, 0.30, 1.0], [0.35, 0.27, 0.18, 1.0])
+    ax.plot_surface(xs, ys, zs, facecolors=couleurs, linewidth=0, shade=False)
+
+    # Magnétopause moyenne (Winslow et al. 2013) : r = R_ss (2 / (1 + cos(theta)))^alpha,
+    # centrée sur le dipôle, décalé de 0.196 R_M vers le nord
+    if magnetopause:
+        R_ss, alpha, z_dip = 1.45, 0.5, 0.196
+        th, ph = np.meshgrid(np.radians(np.linspace(0, 140, 30)), np.linspace(0, 2 * np.pi, 40))
+        r = R_ss * (2 / (1 + np.cos(th)))**alpha
+        ax.plot_wireframe(r * np.cos(th), r * np.sin(th) * np.cos(ph), z_dip + r * np.sin(th) * np.sin(ph),
+                          color="tab:orange", lw=0.4, alpha=0.35)
+        ax.plot([], [], color="tab:orange", lw=1, label="magnétopause (Winslow+2013)")
+
+    # Trajectoire
+    if valeurs is None:
+        ax.plot(x, y, z, color="k", lw=1.2, label="trajectoire")
+    else:
+        sc = ax.scatter(x, y, z, c=valeurs, s=4, cmap="viridis", depthshade=False)
+        fig.colorbar(sc, ax=ax, shrink=0.6, pad=0.1, label=label_valeurs)
+    ax.scatter(*P[0], color="tab:blue", s=40, depthshade=False, label="début")
+    ax.scatter(*P[-1], color="tab:red", s=40, depthshade=False, label="fin")
+
+    # Axes de même échelle (sinon la planète apparaît en ellipsoïde)
+    lim = 1.05 * max(np.abs(P).max(), 2.0 if magnetopause else 1.2)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_zlim(-lim, lim)
+    ax.set_box_aspect((1, 1, 1))
+
+    # Direction du Soleil
+    ax.quiver(0.6 * lim, 0, 0, 0.35 * lim, 0, 0, color="gold", lw=2, arrow_length_ratio=0.3)
+    ax.text(lim, 0, 0.08 * lim, "Soleil", color="darkgoldenrod")
+
+    ax.set_xlabel(r"$X_{MSO}$ [$R_M$]")
+    ax.set_ylabel(r"$Y_{MSO}$ [$R_M$]")
+    ax.set_zlabel(r"$Z_{MSO}$ [$R_M$]")
+    ax.set_title(titre)
+    ax.legend(loc="upper left", fontsize=8)
+    plt.show()
+    return fig, ax
+
 
 '''Fonctions à lancer'''
 #mag(deb, fin)
@@ -450,4 +511,6 @@ def spectro_mag(date_debut, date_fin, duree_fen=300, pas=30, fmax=0.1, ion="Na+"
 #print("serie temporelle :\n", mes_xyz_test.time, "\n")
 #print("série position :\n", mes_xyz_test.values)
 #print_mes_mag(mes_xyz_test)
-print(mes_xyz_test.units)
+
+orbite_3d(positions)                       # positions = [(x1, y1, z1), (x2, y2, z2), ...]
+orbite_3d(positions, valeurs=temps_s, label_valeurs="temps (s)")   # trajectoire colorée
