@@ -1,0 +1,36 @@
+Code pour extraire et traiter les donnees liees a la magnetosphere de mercure recuperees lors de la mission MESSENGER
+
+## speasy_training_v2.py
+permet la recuperation des donnees et le trace des courbes magnetiques a partir d'une fenetre temporelle
+ajout d'un outil de visualisation du lieu sur l'orbite ou les mesures ont ete faites
+
+### Analyse des ondes à la magnétopause de Mercure (MESSENGER)
+
+**Objectif.** Repérer et caractériser les instabilités de Kelvin-Helmholtz (KH)
+et les ondes cyclotron ioniques (notamment Na⁺) à partir du magnétomètre de
+MESSENGER, en reproduisant la méthode de Gershman et al. (2015) : spectres de
+puissance parallèle/perpendiculaire au champ moyen, polarisation, spectrogramme
+glissant. La visualisation 3D replace la zone de mesure sur l'orbite et par
+rapport à la magnétopause moyenne.
+
+**Données.** Champ magnétique (20 Hz) et positions de MESSENGER, repère MSO,
+récupérés via `speasy` depuis AMDA. Événement test : 31 janvier 2014, 09:19–09:29.
+
+**Fonctions**
+
+| Fonction | Rôle |
+|---|---|
+| `mag(debut, fin)` | Bx, By, Bz et \|B\| en fonction du temps |
+| `cyclo(nb_masse, B, charge)` | Fréquence cyclotron d'un ion (Hz) pour B en nT |
+| `psd_mag(debut, fin, ...)` | PSD ∥ et ⊥ à B (detrending d'ordre 2, repère local, FFT, lissage sur 3 bins), polarisation, IC 95 %, raies cyclotron H⁺/He²⁺/O⁺/Na⁺ |
+| `spectro_mag(debut, fin, ...)` | Spectrogramme de P⊥ et de la polarisation sur fenêtres glissantes (5 min par défaut) |
+| `orbite_complete(coords)` | Prolonge un arc en orbite képlérienne complète (ajustement linéaire de 1/r) |
+| `orbite_3d(coords, ...)` | Trajectoire 3D interactive, Mercure, magnétopause de Winslow et al. (2013), direction du Soleil |
+| `print_mes_mag(data)` | Inspection d'un objet `speasy` |
+
+**Dépendances.** numpy, scipy, matplotlib, speasy. Backend matplotlib interactif
+pour la rotation 3D.
+
+---
+
+## Prochaine fonction

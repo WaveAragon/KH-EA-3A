@@ -10,7 +10,8 @@ from matplotlib.colors import LogNorm
 
 deb = "2014-1-31 09:19"
 fin = "2014-1-31 09:29"
-mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
+if __name__ == "__main__":
+    mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
 
 mes_xyz_test = spz.get_data('amda/mes_xyz_orbmso', deb, fin)
 positions = mes_xyz_test.values
@@ -439,7 +440,33 @@ def spectro_mag(date_debut, date_fin, duree_fen=300, pas=30, fmax=0.1, ion="Na+"
     axs[2, 0].set_xlabel("UTC")
     plt.show()
 
-def orbite_3d(coords, valeurs=None, label_valeurs="", magnetopause=True, titre=""):
+def orbite_complete(coords, n=600):
+    """
+    Prolonge un arc de trajectoire en orbite képlérienne complète (Mercure au foyer).
+    Retourne un tableau (n, 3) en R_M, repère MSO, ainsi que (e, p) pour contrôle.
+    """
+    P = np.asarray(coords, dtype=float)
+
+    # Plan orbital : il contient l'origine (foyer), donc SVD sans centrage
+    _, _, Vt = np.linalg.svd(P, full_matrices=False)
+    e1, e2 = Vt[0], Vt[1]
+
+    a, b = P @ e1, P @ e2
+    r = np.hypot(a, b)
+    th = np.arctan2(b, a)
+
+    # 1/r = A + B cos(th) + C sin(th)
+    M = np.column_stack([np.ones_like(th), np.cos(th), np.sin(th)])
+    (A, B, C), *_ = np.linalg.lstsq(M, 1 / r, rcond=None)
+    p, e = 1 / A, np.hypot(B, C) / A
+    if e >= 1:
+        raise ValueError(f"Ajustement non elliptique (e = {e:.2f}) : arc trop court ou bruité.")
+
+    t = np.linspace(0, 2 * np.pi, n)
+    rr = 1 / (A + B * np.cos(t) + C * np.sin(t))
+    return np.outer(rr * np.cos(t), e1) + np.outer(rr * np.sin(t), e2), e, p
+
+def orbite_3d(coords, valeurs=None, label_valeurs="", magnetopause=True, titre="", orbite_entiere=True):
     """
     Trajectoire 3D autour de Mercure, orientable à la souris (cliquer-glisser),
     zoom avec clic droit-glisser.
@@ -483,6 +510,13 @@ def orbite_3d(coords, valeurs=None, label_valeurs="", magnetopause=True, titre="
     ax.scatter(*P[0], color="tab:blue", s=40, depthshade=False, label="début")
     ax.scatter(*P[-1], color="tab:red", s=40, depthshade=False, label="fin")
 
+    # Ellipse complete
+    P_orb = P
+    if orbite_entiere:
+        P_orb, e, p = orbite_complete(P)
+        ax.plot(*P_orb.T, color="grey", lw=0.8, ls="--",
+                label=f"orbite complète (e = {e:.2f})")
+
     # Axes de même échelle (sinon la planète apparaît en ellipsoïde)
     lim = 1.05 * max(np.abs(P).max(), 2.0 if magnetopause else 1.2)
     ax.set_xlim(-lim, lim)
@@ -512,5 +546,6 @@ def orbite_3d(coords, valeurs=None, label_valeurs="", magnetopause=True, titre="
 #print("série position :\n", mes_xyz_test.values)
 #print_mes_mag(mes_xyz_test)
 
-orbite_3d(positions)                       # positions = [(x1, y1, z1), (x2, y2, z2), ...]
-orbite_3d(positions, valeurs=temps_s, label_valeurs="temps (s)")   # trajectoire colorée
+if __name__ == "__main__":
+    orbite_3d(positions)                       # positions = [(x1, y1, z1), (x2, y2, z2), ...]
+    orbite_3d(positions, valeurs=temps_s, label_valeurs="temps (s)")   # trajectoire colorée
