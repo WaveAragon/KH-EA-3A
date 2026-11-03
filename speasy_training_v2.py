@@ -8,8 +8,8 @@ from scipy.stats import chi2
 from matplotlib.colors import LogNorm
 
 
-deb = "2014-1-31 09:19"
-fin = "2014-1-31 09:29"
+deb = "2012-04-28 07:21"
+fin = "2012-04-28 07:47"
 if __name__ == "__main__":
     mes_mag_test = spz.get_data('amda/mes_b_orbmso', deb, fin)
 
@@ -538,14 +538,17 @@ def orbite_3d(coords, valeurs=None, label_valeurs="", magnetopause=True, titre="
 
 
 '''Fonctions à lancer'''
+'''
 #mag(deb, fin)
 #psd_mag(deb, fin)
-#spectro_mag("2014-1-31 09:09", "2014-1-31 09:39")
+spectro_mag("2014-1-31 09:09", "2014-1-31 09:39")
 #print_mes_mag(mes_mag_test)
 #print("serie temporelle :\n", mes_xyz_test.time, "\n")
 #print("série position :\n", mes_xyz_test.values)
-#print_mes_mag(mes_xyz_test)
+orbite_3d(positions)                       # positions = [(x1, y1, z1), (x2, y2, z2), ...]
+orbite_3d(positions, valeurs=temps_s, label_valeurs="temps (s)")   # trajectoire colorée
+'''
 
 if __name__ == "__main__":
-    orbite_3d(positions)                       # positions = [(x1, y1, z1), (x2, y2, z2), ...]
-    orbite_3d(positions, valeurs=temps_s, label_valeurs="temps (s)")   # trajectoire colorée
+    spectro_mag(deb, fin)
+
