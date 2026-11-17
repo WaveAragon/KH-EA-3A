@@ -5,9 +5,10 @@ webapp.py : exploration interactive des données MESSENGER (AMDA via speasy), da
 Reprend la sortie de traitement.py (B, PSD, orbite, position) en figures Plotly zoomables, et permet de
 sélectionner une zone temporelle sur les courbes de B pour en calculer la PSD.
 
-Tous les calculs viennent de traitement.py (téléchargement + cache data/cache/, comblement des trous,
-calcul_psd selon Gershman et al. 2015, fréquences cyclotron, magnétopause de Winslow) : ce fichier ne fait
-que l'interface. Une modification de traitement.py se répercute donc ici.
+Tous les calculs physiques viennent de traitement.py (téléchargement + cache data/cache/, comblement des trous,
+calcul_psd selon Gershman et al. 2015, fréquences cyclotron, magnétopause de Winslow) : une modification de
+traitement.py se répercute donc ici. Ce fichier ajoute l'interface, le lissage d'affichage de la PSD et
+l'ajustement des pentes.
 
 Lancement (depuis la racine du dépôt) :
   pip install dash            (en plus de numpy, scipy, matplotlib, speasy)
@@ -16,17 +17,37 @@ Lancement (depuis la racine du dépôt) :
 
 Utilisation :
   1. Choisir un évènement de events.py ou saisir début / fin ("YYYY-MM-DD HH:MM[:SS]"), puis « Charger ».
-     Comme dans traitement.py, la fenêtre affichée vaut FACTEUR x la durée, centrée sur l'évènement.
-  2. Molette / glisser pour zoomer, outil « Pan » de la barre Plotly pour se déplacer, double-clic pour revenir.
-  3. Outil « Box Select » (barre Plotly) sur les courbes de B : la PSD de la zone sélectionnée se calcule
-     automatiquement. On peut aussi saisir les bornes à la main, ou prendre la zone actuellement affichée.
+     Comme dans traitement.py, les données sont chargées sur la fenêtre FACTEUR x la durée de l'évènement,
+     centrée sur celui-ci (augmenter le facteur pour voir les tendances à plus grande échelle).
+  2. Molette / glisser pour zoomer, outil « Pan » de la barre Plotly pour se déplacer, double-clic ou
+     « ↺ fenêtre initiale » pour revenir (temps et bornes de B). Les bornes de chaque panneau de B suivent
+     le min / max de la zone affichée (+ 8 %) à chaque zoom ou déplacement, tant que la case « bornes de B = min / max »
+     est cochée. Pour une grande fenêtre, la zone affichée est tracée à pleine
+     résolution et le reste réduit par min-max (les pics restent visibles), raffiné dès qu'on y zoome.
+  3. PSD : celle de toute la fenêtre est toujours affichée à droite. Pour une autre zone : outil « Box Select »
+     sur les courbes de B (calcul automatique), bornes saisies à la main, zone affichée, ou évènement seul.
+  4. Réglages PSD (s'appliquent aux deux PSD) :
+     - ions dont on trace la fréquence cyclotron ;
+     - lissage : moyenne glissante de log10(PSD) sur une largeur fixe en décades (affichage seulement) ;
+     - pentes automatiques : ajustement affine par morceaux (continu) de log10(PSD) en fonction de log10(f)
+       sur [f min, f max] (0,1-10 Hz par défaut), après regroupement en intervalles réguliers en log(f) pour
+       ne pas surpondérer les hautes fréquences. Nombre de ruptures fixé (1 à 3) ou choisi par critère BIC ;
+     - pentes manuelles : cocher « pente manuelle » puis cliquer deux points sur le panneau log-log.
+  5. « Sauvegarder » télécharge en JSON tout l'état de l'écran : intervalle, zoom, sélection, réglages,
+     pentes manuelles, et dans "resultats" toutes les valeurs affichées (caractéristiques des PSD, fréquences
+     cyclotron, pentes automatiques avec ruptures et écarts-types, pentes manuelles avec leur valeur).
+     « Importer » recharge les données correspondantes et remet l'écran dans le même état.
 """
 import argparse
+import base64
+import itertools
+import json
 import re
 from collections import OrderedDict
 from datetime import datetime
 
 import numpy as np
+from scipy.optimize import minimize
 from scipy.stats import chi2
 
 import plotly.graph_objects as go
@@ -36,21 +57,43 @@ from dash import Dash, Input, Output, State, ctx, dcc, html, no_update, Patch
 import traitement as tr
 
 # ======================================================================
-# Données en mémoire (application locale mono-utilisateur)
+# Configuration de l'application
 # ======================================================================
-MEMOIRE = OrderedDict()   # clé -> dict(t, B, deb, fin, wd, wf, xyz, notes)
-MEMOIRE_MAX = 6           # nombre de fenêtres gardées en mémoire
-MAX_POINTS_AFFICHES = 300_000  # au-delà, B est décimé pour l'affichage seulement (jamais pour la PSD)
+MEMOIRE = OrderedDict()   # clé -> dict(t, B, deb, fin, wd, wf, facteur, xyz, notes)
+MEMOIRE_MAX = 6           # nombre de chargements gardés en mémoire
+CACHE_PSD = OrderedDict()  # (clé, sélection) -> résultat de tr.calcul_psd ou message d'erreur
+CACHE_AJUST = OrderedDict()
 
-COUL_EVT = "rgba(255,127,14,0.15)"   # orange de traitement.py
-COUL_SEL = "rgba(128,0,128,0.13)"    # violet : zone sélectionnée
+# Affichage de B : pleine résolution dans la zone visible (min-max au-delà de NB_VISIBLE intervalles),
+# min-max sur NB_HORS intervalles pour le reste de la fenêtre
+NB_VISIBLE = 6000
+NB_HORS = 1500
+MAX_POINTS_ORBITE = 6000
+Y_MARGE = 0.08    # marge relative autour du min / max de B dans la zone affichée
+
+FIT_FMIN, FIT_FMAX = 0.1, 10.0   # Hz, plage par défaut de l'ajustement des pentes
+FIT_NB_BINS = 40                 # intervalles réguliers en log10(f) pour l'ajustement
+FIT_MIN_BINS = 5                 # intervalles minimum par segment (5 sur 40 = 0,25 décade sur 0,1-10 Hz)
+VERSION_CONFIG = 3
+
+# Ions proposés pour les fréquences cyclotron : ceux de traitement.py, plus d'autres ions de l'environnement
+# de Mercure (exosphère, vent solaire)
+IONS_DISPO = dict(tr.IONS)
+IONS_DISPO.update({"He+": (4, 1), "Mg+": (24, 1), "K+": (39, 1), "Ca+": (40, 1)})
+COULEURS_IONS = dict(tr.COULEURS_IONS)
+COULEURS_IONS.update({"He+": "olive", "Mg+": "#17becf", "K+": "#8c564b", "Ca+": "#e377c2"})
+
+COUL_EVT = "rgba(255,127,14,0.22)"   # orange de traitement.py : évènement
+COUL_SEL = "rgba(128,0,128,0.15)"    # violet : zone sélectionnée
+COMPOSANTES = {"perp": ("P⊥", "purple", "#4b0055"), "para": ("P∥", "mediumseagreen", "#0b6b3a")}
+COUL_MANUELLE = "#d62728"
 CONFIG_FIG = {"scrollZoom": True, "displaylogo": False,
               "toImageButtonOptions": {"format": "png", "scale": 2}}
 
 
 def parse_date(s):
     """Accepte "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:MM:SS[.ffffff]" et le séparateur T (format Plotly inclus)."""
-    s = (s or "").strip().replace("T", " ")
+    s = str(s or "").strip().replace("T", " ")
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
             return datetime.strptime(s, fmt)
@@ -59,13 +102,26 @@ def parse_date(s):
     raise ValueError(f"date illisible : « {s} » (format attendu YYYY-MM-DD HH:MM[:SS])")
 
 
-def fmt_date(d):
-    return f"{d:%Y-%m-%d %H:%M:%S}"
+def fmt_date(d, ms=False):
+    return f"{d:%Y-%m-%d %H:%M:%S.%f}"[:-3] if ms else f"{d:%Y-%m-%d %H:%M:%S}"
 
 
+def fmt_num(v, defaut):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return defaut
+
+
+# ======================================================================
+# Données
+# ======================================================================
 def charger(deb, fin, facteur, force):
-    """Télécharge (ou relit le cache) et prépare B et la position. Renvoie la clé en mémoire."""
-    marge = (fin - deb) * ((facteur - 1) / 2)
+    """
+    Télécharge (ou relit le cache) B et la position sur la fenêtre FACTEUR x la durée de l'évènement, centrée
+    sur celui-ci (comme traitement.py) ; comble les petits trous. Renvoie la clé en mémoire.
+    """
+    marge = (fin - deb) * ((facteur - 1) / 2)   # même formule que tr.fenetre_elargie, facteur réglable
     wd, wf = (deb - marge).replace(microsecond=0), (fin + marge).replace(microsecond=0)
     if wd < tr.PLAGE_B[0] or wf > tr.PLAGE_B[1]:
         raise tr.DonneesInsuffisantes(
@@ -76,6 +132,7 @@ def charger(deb, fin, facteur, force):
     if donnees_b is None:
         raise tr.DonneesInsuffisantes("aucune donnée de champ magnétique AMDA sur cette fenêtre")
     t, B = donnees_b
+    t = t.astype("datetime64[ns]")
     manquant = ~np.isfinite(B).all(axis=1)
     if manquant.all():
         raise tr.DonneesInsuffisantes(f"champ magnétique entièrement manquant (NaN) ({len(B)} échantillons)")
@@ -89,46 +146,269 @@ def charger(deb, fin, facteur, force):
     xyz = tr.telecharger(tr.PRODUIT_XYZ, wd, wf, force)
     if xyz is None:
         notes.append("pas de position")
+    else:
+        xyz = (xyz[0].astype("datetime64[ns]"), xyz[1])
 
     cle = f"{wd:%Y%m%dT%H%M%S}_{wf:%Y%m%dT%H%M%S}_{datetime.now():%H%M%S%f}"
-    MEMOIRE[cle] = dict(t=t, B=B, deb=deb, fin=fin, wd=wd, wf=wf, xyz=xyz, notes=notes)
+    MEMOIRE[cle] = dict(t=t, t_ms=t.astype("datetime64[ms]").astype(np.int64), B=B,
+                        B_abs=np.linalg.norm(B, axis=1), deb=deb, fin=fin, wd=wd, wf=wf,
+                        facteur=facteur, xyz=xyz, notes=notes)
     while len(MEMOIRE) > MEMOIRE_MAX:
         MEMOIRE.popitem(last=False)
     return cle
 
 
+def psd(cle, sel=None):
+    """PSD de toute la fenêtre (sel=None) ou d'une sélection [début, fin] ; résultat mis en cache."""
+    k = (cle, tuple(sel) if sel else None)
+    if k not in CACHE_PSD:
+        d = MEMOIRE[cle]
+        a, b = (parse_date(sel[0]), parse_date(sel[1])) if sel else (d["wd"], d["wf"])
+        m = (d["t"] >= np.datetime64(a)) & (d["t"] <= np.datetime64(b))
+        try:
+            CACHE_PSD[k] = tr.calcul_psd(d["t"][m], d["B"][m])
+        except tr.DonneesInsuffisantes as exc:
+            CACHE_PSD[k] = str(exc)
+        while len(CACHE_PSD) > 30:
+            CACHE_PSD.popitem(last=False)
+    return CACHE_PSD[k]
+
+
+# ======================================================================
+# Réduction pour l'affichage de B
+# ======================================================================
+def minmax(x, y, nb):
+    """Garde, dans chacun des nb intervalles, le minimum et le maximum de y (dans l'ordre) : les pics restent."""
+    n = len(y)
+    if n <= 2 * nb:
+        return x, y
+    bords = np.linspace(0, n, nb + 1).astype(int)
+    lo = np.where(np.isfinite(y), y, np.inf)
+    hi = np.where(np.isfinite(y), y, -np.inf)
+    i_min = np.array([a + np.argmin(lo[a:b]) for a, b in zip(bords[:-1], bords[1:])])
+    i_max = np.array([a + np.argmax(hi[a:b]) for a, b in zip(bords[:-1], bords[1:])])
+    idx = np.unique(np.r_[i_min, i_max])
+    return x[idx], y[idx]
+
+
+def plages_b(d, a, b):
+    """
+    Bornes verticales des 4 panneaux de B : minimum et maximum des données entre a et b (la zone affichée),
+    plus une marge de Y_MARGE. None si pas assez de données.
+    """
+    i0 = np.searchsorted(d["t_ms"], np.datetime64(a, "ms").astype(np.int64))
+    i1 = np.searchsorted(d["t_ms"], np.datetime64(b, "ms").astype(np.int64), side="right")
+    plages = []
+    for y in (d["B"][:, 0], d["B"][:, 1], d["B"][:, 2], d["B_abs"]):
+        v = y[i0:i1]
+        v = v[np.isfinite(v)]
+        if len(v) < 2:
+            plages.append(None)
+            continue
+        lo, hi = v.min(), v.max()
+        marge = max(Y_MARGE * (hi - lo), 1.0)
+        plages.append([float(lo - marge), float(hi + marge)])
+    return plages
+
+
+def bornes_vue(d, vue):
+    return (parse_date(vue[0]), parse_date(vue[1])) if vue else (d["wd"], d["wf"])
+
+
+def donnees_affichees(d, vue):
+    """
+    x, y pour Bx, By, Bz, |B| : pleine résolution dans la vue, min-max ailleurs.
+    x est envoyé en texte ISO sans fuseau ("2011-05-15T09:23:30.050") : Plotly lit les dates en texte telles
+    quelles (UTC ici), alors qu'il convertirait des millisecondes numériques dans le fuseau du navigateur
+    (décalage d'une ou deux heures en France).
+    """
+    a, b = (parse_date(vue[0]), parse_date(vue[1])) if vue else (d["wd"], d["wf"])
+    tms = d["t_ms"]
+    i0 = np.searchsorted(tms, np.datetime64(a, "ms").astype(np.int64))
+    i1 = np.searchsorted(tms, np.datetime64(b, "ms").astype(np.int64), side="right")
+    n = len(tms)
+    nb_g = max(1, int(NB_HORS * i0 / max(1, n - (i1 - i0))))
+    nb_d = max(1, NB_HORS - nb_g)
+    sorties = []
+    for y in (d["B"][:, 0], d["B"][:, 1], d["B"][:, 2], d["B_abs"]):
+        morceaux = [minmax(tms[s], y[s], nb) for s, nb in ((slice(0, i0), nb_g), (slice(i0, i1), NB_VISIBLE),
+                                                             (slice(i1, n), nb_d))]
+        x = np.concatenate([m[0] for m in morceaux]).astype("datetime64[ms]")
+        sorties.append((np.datetime_as_string(x, unit="ms"), np.concatenate([m[1] for m in morceaux])))
+    return sorties
+
+
+# ======================================================================
+# Traitements de la PSD : lissage, pentes
+# ======================================================================
+def lisser(f, P, largeur_dec):
+    """
+    Moyenne glissante de log10(P) sur une fenêtre de largeur constante en décades, centrée sur chaque fréquence.
+    La largeur relative est la même à toutes les fréquences, ce qui convient à la lecture des pentes en log-log.
+    Le bin f = 0 est laissé tel quel.
+    """
+    if not largeur_dec or largeur_dec <= 0:
+        return P
+    x = np.log10(f[1:])
+    ly = np.log10(np.maximum(P[1:], np.finfo(float).tiny))
+    cs = np.r_[0.0, np.cumsum(ly)]
+    lo = np.searchsorted(x, x - largeur_dec / 2, side="left")
+    hi = np.searchsorted(x, x + largeur_dec / 2, side="right")
+    return np.r_[P[0], 10 ** ((cs[hi] - cs[lo]) / (hi - lo))]
+
+
+def matrice_ext(xx, br):
+    xx = np.asarray(xx, dtype=float)
+    return np.column_stack([np.ones(len(xx)), xx] + [np.maximum(0.0, xx - b) for b in br])
+
+
+def ajuster_pentes(f, P, fmin, fmax, mode):
+    """
+    Ajustement affine par morceaux, continu, de y = log10(P) en fonction de x = log10(f) sur [fmin, fmax].
+    Les points sont d'abord moyennés dans FIT_NB_BINS intervalles réguliers en x (sinon les hautes fréquences,
+    bien plus nombreuses en échelle linéaire, dicteraient l'ajustement). Modèle :
+        y = a + b x + sum_i c_i max(0, x - x_i)
+    Les ruptures x_i sont cherchées exhaustivement parmi les milieux d'intervalles (au moins FIT_MIN_BINS
+    intervalles par segment), puis affinées (Nelder-Mead, même contrainte). mode = "auto" : nombre de ruptures
+    (0 à 3) choisi par le critère BIC ; mode = "1", "2" ou "3" : nombre imposé.
+    Renvoie un dict (ruptures en Hz, pentes et écarts-types, fonction modèle) ; lève ValueError si impossible.
+    """
+    m = (f > 0) & (f >= fmin) & (f <= fmax) & np.isfinite(P) & (P > 0)
+    if m.sum() < 2 * FIT_MIN_BINS:
+        raise ValueError(f"trop peu de points entre {fmin:g} et {fmax:g} Hz")
+    x, y = np.log10(f[m]), np.log10(P[m])
+    bords = np.linspace(x.min(), x.max(), FIT_NB_BINS + 1)
+    idx = np.clip(np.digitize(x, bords) - 1, 0, FIT_NB_BINS - 1)
+    occupes = [i for i in range(FIT_NB_BINS) if (idx == i).any()]
+    xb = np.array([x[idx == i].mean() for i in occupes])
+    yb = np.array([y[idx == i].mean() for i in occupes])
+    n = len(xb)
+    largeur_min = 0.9 * FIT_MIN_BINS * (x.max() - x.min()) / FIT_NB_BINS
+
+    def rss(br):
+        X = matrice_ext(xb, br)
+        beta = np.linalg.lstsq(X, yb, rcond=None)[0]
+        r = yb - X @ beta
+        return float(r @ r), beta
+
+    def cout(v):  # l'affinage respecte aussi la largeur minimale des segments
+        v = np.sort(v)
+        if np.diff(np.r_[x.min(), v, x.max()]).min() < largeur_min:
+            return np.inf
+        return rss(v)[0]
+
+    def meilleur(k):
+        if k == 0:
+            return [], rss([])[0]
+        positions = range(FIT_MIN_BINS, n - FIT_MIN_BINS + 1)
+        best = (np.inf, None)
+        for combi in itertools.combinations(positions, k):
+            if any(b - a < FIT_MIN_BINS for a, b in zip(combi, combi[1:])):
+                continue
+            br = [(xb[i - 1] + xb[i]) / 2 for i in combi]
+            r = rss(br)[0]
+            if r < best[0]:
+                best = (r, br)
+        if best[1] is None:
+            return None, np.inf
+        opt = minimize(cout, best[1], method="Nelder-Mead", options=dict(xatol=1e-4, fatol=1e-10))
+        br = list(np.sort(opt.x))
+        r = cout(br)
+        return (br, r) if r <= best[0] else (best[1], best[0])
+
+    k_max = max(0, min(3, n // FIT_MIN_BINS - 1))
+    candidats = range(0, k_max + 1) if mode == "auto" else [min(int(mode), k_max)]
+    resultats = []
+    for k in candidats:
+        br, r = meilleur(k)
+        if br is None:
+            continue
+        bic = n * np.log(max(r, 1e-300) / n) + (2 + 2 * k) * np.log(n)
+        resultats.append((bic, k, br, r))
+    if not resultats:
+        raise ValueError("ajustement impossible")
+    _, k, br, r = min(resultats, key=lambda e: e[0])
+
+    X = matrice_ext(xb, br)
+    beta = np.linalg.lstsq(X, yb, rcond=None)[0]
+    p = 2 + 2 * k
+    s2 = r / (n - p) if n > p else r / n
+    cov = s2 * np.linalg.pinv(X.T @ X)
+    bornes = np.r_[x.min(), br, x.max()]
+    segments = []
+    for j in range(k + 1):
+        L = np.zeros(len(beta))
+        L[1] = 1
+        L[2:2 + j] = 1
+        segments.append(dict(f1=10 ** bornes[j], f2=10 ** bornes[j + 1], pente=float(L @ beta),
+                             err=float(np.sqrt(max(L @ cov @ L, 0)))))
+
+    def modele(xx):
+        return matrice_ext(xx, br) @ beta
+
+    return dict(k=k, auto=(mode == "auto"), ruptures=[10 ** b for b in br], segments=segments,
+                modele=modele, xmin=x.min(), xmax=x.max(), n_bins=n)
+
+
+def ajustement_cache(cle_cache, f, P, fmin, fmax, mode):
+    """ajuster_pentes mémorisé : le curseur de lissage ne relance pas l'ajustement."""
+    if cle_cache not in CACHE_AJUST:
+        try:
+            CACHE_AJUST[cle_cache] = ajuster_pentes(f, P, fmin, fmax, mode)
+        except ValueError as exc:
+            CACHE_AJUST[cle_cache] = exc
+        while len(CACHE_AJUST) > 60:
+            CACHE_AJUST.popitem(last=False)
+    res = CACHE_AJUST[cle_cache]
+    if isinstance(res, Exception):
+        raise res
+    return res
+
+
+def pente_manuelle(p):
+    return np.log10(p["p2"] / p["p1"]) / np.log10(p["f2"] / p["f1"])
+
+
+def composantes_choisies(reglages):
+    c = reglages.get("composante") or "perp"
+    return ["perp", "para"] if c == "both" else [c]
+
+
+def ions_choisis(reglages):
+    ions = reglages.get("ions")
+    return [i for i in (list(tr.IONS) if ions is None else ions) if i in IONS_DISPO]
+
+
 # ======================================================================
 # Figures
 # ======================================================================
-def vrects(deb, fin, couleur, lignes, nom):
-    """Bandes verticales (une par sous-graphe) ; lignes = liste des (xref, yref domain)."""
-    return [dict(type="rect", xref=xr, yref=f"{yr} domain", x0=deb, x1=fin, y0=0, y1=1,
-                 fillcolor=couleur, line_width=0, layer="below", name=nom) for xr, yr in lignes]
-
-
 LIGNES_B = [("x", "y"), ("x2", "y2"), ("x3", "y3"), ("x4", "y4")]
+
+
+def vrects(deb, fin, couleur, lignes):
+    """Bandes verticales (une par sous-graphe) ; lignes = liste des (xref, yref)."""
+    # line=dict(width=0) et non line_width=0 : ces formes passent aussi par des Patch, où Plotly ne
+    # traduit pas la notation abrégée (le contour par défaut réapparaîtrait)
+    return [dict(type="rect", xref=xr, yref=f"{yr} domain", x0=deb, x1=fin, y0=0, y1=1,
+                 fillcolor=couleur, line=dict(width=0), layer="below") for xr, yr in lignes]
 
 
 def formes_b(d, sel=None):
     """Bandes évènement / sélection et lignes B = 0 des quatre sous-graphes de B."""
     formes = [dict(type="line", xref=f"{xr} domain", yref=yr, x0=0, x1=1, y0=0, y1=0,
                    line=dict(color="black", dash="dot", width=0.8)) for xr, yr in LIGNES_B[:3]]
-    formes += vrects(d["deb"], d["fin"], COUL_EVT, LIGNES_B, "evenement")
+    formes += vrects(d["deb"], d["fin"], COUL_EVT, LIGNES_B)
     if sel:
-        formes += vrects(sel[0], sel[1], COUL_SEL, LIGNES_B, "selection")
+        formes += vrects(sel[0], sel[1], COUL_SEL, LIGNES_B)
     return formes
 
 
-def fig_b(d):
-    t, B = d["t"], d["B"]
-    pas = max(1, int(np.ceil(len(t) / MAX_POINTS_AFFICHES)))
-    t_aff, B_aff = t[::pas], B[::pas]
-    B_abs = np.linalg.norm(B_aff, axis=1)
+def fig_b(cle, vue=None, sel=None):
+    d = MEMOIRE[cle]
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.025)
-    series = [(B_aff[:, 0], "Bx"), (B_aff[:, 1], "By"), (B_aff[:, 2], "Bz"), (B_abs, "|B|")]
-    for i, (y, nom) in enumerate(series, 1):
-        # Marqueurs invisibles : nécessaires pour que l'outil de sélection Plotly renvoie la zone choisie
-        fig.add_trace(go.Scattergl(x=t_aff, y=y, mode="lines+markers", name=nom, showlegend=False,
+    for i, ((x, y), nom) in enumerate(zip(donnees_affichees(d, vue), ("Bx", "By", "Bz", "|B|")), 1):
+        # Marqueurs invisibles : nécessaires pour que l'outil de sélection Plotly renvoie la zone choisie.
+        fig.add_trace(go.Scattergl(x=x, y=y, mode="lines+markers", name=nom, showlegend=False,
                                    line=dict(color="black", width=1),
                                    marker=dict(size=3, opacity=0),
                                    selected=dict(marker=dict(opacity=0)),
@@ -137,16 +417,21 @@ def fig_b(d):
                       row=i, col=1)
         fig.update_yaxes(title_text=f"{nom} (nT)", row=i, col=1)
     duree = (d["fin"] - d["deb"]).total_seconds() / 60
-    titre = (f"{d['deb']:%Y-%m-%d %H:%M:%S} → {d['fin']:%H:%M:%S} UTC (durée {duree:.1f} min) — "
-             f"fenêtre {d['wd']:%H:%M:%S} → {d['wf']:%H:%M:%S}")
-    if pas > 1:
-        titre += f" — affichage décimé 1/{pas}"
-    fig.update_layout(shapes=formes_b(d), title=dict(text=titre, font_size=13),
+    titre = (f"évènement {d['deb']:%Y-%m-%d %H:%M:%S} → {d['fin']:%H:%M:%S} UTC (durée {duree:.1f} min) — "
+             f"fenêtre ×{d['facteur']:g} : {d['wd']:%H:%M:%S} → {d['wf']:%H:%M:%S}")
+    s = (parse_date(sel[0]), parse_date(sel[1])) if sel else None
+    fig.update_layout(shapes=formes_b(d, s), title=dict(text=titre, font_size=12),
                       height=620, margin=dict(l=60, r=15, t=45, b=40),
                       dragmode="zoom", selectdirection="h", hovermode="x",
-                      uirevision="b", template="plotly_white")
-    fig.update_xaxes(range=[d["wd"], d["wf"]], showspikes=True, spikemode="across", spikethickness=1)
-    fig.update_xaxes(title_text=f"UTC ({d['wd']:%Y-%m-%d})", tickformat="%H:%M:%S", row=4, col=1)
+                      uirevision=cle, template="plotly_white")
+    # La plage initiale (celle que rétablit le double-clic) est la fenêtre ×facteur
+    x_range = list(bornes_vue(d, vue))
+    fig.update_xaxes(type="date", range=x_range, showspikes=True, spikemode="across", spikethickness=1)
+    # Bornes de B calées sur la zone affichée (sinon l'échelle couvre toute l'orbite, périherme compris)
+    for i, plage in enumerate(plages_b(d, *x_range), 1):
+        if plage:
+            fig.update_yaxes(range=plage, autorange=False, row=i, col=1)
+    fig.update_xaxes(title_text="UTC", tickformat="%H:%M:%S\n%Y-%m-%d", row=4, col=1)
     return fig
 
 
@@ -159,46 +444,56 @@ def fig_vide(texte, height=300):
     return fig
 
 
-def tracer_psd_panneau(fig, r, row, col, log_x, legende, nom_axe_x):
+def refs(fig, row, col):
+    sp = fig.get_subplot(row, col)
+    return sp.xaxis.plotly_name.replace("axis", ""), sp.yaxis.plotly_name.replace("axis", "")
+
+
+def tracer_psd_panneau(fig, r, row, col, log_x, legende, lissage, ions):
     """Un panneau de PSD : log-log (log_x=True) ou zoom en fréquence linéaire jusqu'à ZOOM_LIN."""
-    f, perp, para = r["f"], r["perp"], r["para"]
-    m = slice(1, None) if log_x else (f > 0) & (f <= tr.ZOOM_LIN)
-    mode = "lines" if log_x else "lines+markers"
-    for y, nom, coul in ((perp, "P⊥", "purple"), (para, "P∥", "mediumseagreen")):
-        fig.add_trace(go.Scatter(x=f[m], y=y[m], mode=mode, name=nom, legendgroup=nom, showlegend=legende,
-                                 line=dict(color=coul, width=1.4), marker=dict(size=4),
+    f = r["f"]
+    m = np.arange(1, len(f)) if log_x else np.flatnonzero((f > 0) & (f <= tr.ZOOM_LIN))
+    for comp, (nom, coul, _) in COMPOSANTES.items():
+        brut = r[comp]
+        lisse = lisser(f, brut, lissage)
+        # customdata "log" : seuls les clics sur le panneau log-log servent aux pentes manuelles
+        cd = ["log" if log_x else "lin"] * len(m)
+        if lissage:
+            fig.add_trace(go.Scatter(x=f[m], y=brut[m], mode="lines", name=nom + " brut", legendgroup=nom,
+                                     showlegend=False, line=dict(color=coul, width=0.8), opacity=0.25,
+                                     customdata=cd, hoverinfo="skip"), row=row, col=col)
+        fig.add_trace(go.Scatter(x=f[m], y=lisse[m], mode="lines" if log_x else "lines+markers", name=nom,
+                                 legendgroup=nom, showlegend=legende, customdata=cd,
+                                 line=dict(color=coul, width=1.5), marker=dict(size=4),
                                  hovertemplate="f = %{x:.4g} Hz<br>" + nom + " = %{y:.3g} nT²/Hz<extra></extra>"),
                       row=row, col=col)
 
     f_min, f_max = (f[1], f[-1]) if log_x else (0, tr.ZOOM_LIN)
-    xd = fig.get_subplot(row, col).xaxis.plotly_name.replace("axis", "")   # "x", "x2", ...
-    yd = fig.get_subplot(row, col).yaxis.plotly_name.replace("axis", "")
-    formes = []
+    xd, yd = refs(fig, row, col)
     if log_x:  # bins atténués par le detrending
-        formes.append(dict(type="rect", xref=xd, yref=f"{yd} domain", x0=f[1], x1=2 * f[1], y0=0, y1=1,
-                           fillcolor="rgba(0,0,0,0.08)", line_width=0, layer="below"))
-    for ion, (A, q) in tr.IONS.items():
+        fig.add_shape(type="rect", xref=xd, yref=f"{yd} domain", x0=f[1], x1=2 * f[1], y0=0, y1=1,
+                      fillcolor="rgba(0,0,0,0.08)", line_width=0, layer="below")
+    for ion in ions:
+        A, q = IONS_DISPO[ion]
         fc = tr.cyclo(A, r["B_moy"], q)
         if not f_min < fc < f_max:
             continue
-        coul = tr.COULEURS_IONS[ion]
-        formes.append(dict(type="rect", xref=xd, yref=f"{yd} domain",
-                           x0=tr.cyclo(A, r["B_moy"] - r["B_std"], q), x1=tr.cyclo(A, r["B_moy"] + r["B_std"], q),
-                           y0=0, y1=1, fillcolor=coul, opacity=0.15, line_width=0, layer="below"))
-        formes.append(dict(type="line", xref=xd, yref=f"{yd} domain", x0=fc, x1=fc, y0=0, y1=1,
-                           line=dict(color=coul, dash="dash", width=1.2)))
+        coul = COULEURS_IONS[ion]
+        fig.add_shape(type="rect", xref=xd, yref=f"{yd} domain",
+                      x0=tr.cyclo(A, r["B_moy"] - r["B_std"], q), x1=tr.cyclo(A, r["B_moy"] + r["B_std"], q),
+                      y0=0, y1=1, fillcolor=coul, opacity=0.15, line_width=0, layer="below")
+        fig.add_shape(type="line", xref=xd, yref=f"{yd} domain", x0=fc, x1=fc, y0=0, y1=1,
+                      line=dict(color=coul, dash="dash", width=1.2))
         # Les annotations sur un axe log se placent en log10(x)
         fig.add_annotation(x=np.log10(fc) if log_x else fc, y=1, xref=xd, yref=f"{yd} domain",
                            text=f"{ion} : {fc:.3g} Hz", textangle=-90, showarrow=False,
                            xanchor="right", yanchor="top", font=dict(size=10, color=coul))
-    for s in formes:
-        fig.add_shape(**s)
 
     if log_x:
         # Barre d'IC à 95 % (lissage sur 3 bins, fenêtre rectangulaire : 6 ddl), comme traitement.py
         nu = 6
         ic_bas, ic_haut = nu / chi2.ppf(0.975, nu), nu / chi2.ppf(0.025, nu)
-        y_ok = np.r_[perp[1:], para[1:]]
+        y_ok = np.r_[r["perp"][1:], r["para"][1:]]
         y_ok = y_ok[np.isfinite(y_ok) & (y_ok > 0)]
         if len(y_ok):
             y_bas, y_haut = y_ok.min(), y_ok.max()
@@ -216,34 +511,128 @@ def tracer_psd_panneau(fig, r, row, col, log_x, legende, nom_axe_x):
     else:
         fig.update_xaxes(range=[0, tr.ZOOM_LIN], row=row, col=col)
     fig.update_yaxes(type="log", title_text="PSD [nT²/Hz]", exponentformat="power", row=row, col=col)
-    fig.update_xaxes(title_text=nom_axe_x, row=row, col=col)
+    fig.update_xaxes(title_text="Fréquence [Hz]", row=row, col=col)
 
 
-def fig_psd(r, titre, horizontal, height):
+def tracer_ajustement(fig, ajust, comp, row, col, legende):
+    """Droites ajustées, ruptures et valeurs des pentes sur le panneau log-log."""
+    nom, _, coul = COMPOSANTES[comp]
+    xd, yd = refs(fig, row, col)
+    xx = np.linspace(ajust["xmin"], ajust["xmax"], 300)
+    yy = ajust["modele"](xx)
+    etiquette = f"ajustement {nom} ({ajust['k']} rupture{'s' if ajust['k'] > 1 else ''}"
+    etiquette += ", BIC)" if ajust["auto"] else ")"
+    fig.add_trace(go.Scatter(x=10 ** xx, y=10 ** yy, mode="lines", name=etiquette, showlegend=legende,
+                             line=dict(color=coul, width=2.4, dash="dash"), hoverinfo="skip"), row=row, col=col)
+    decal = 2.5 if comp == "perp" else 1 / 2.5   # P⊥ au-dessus de la droite, P∥ en dessous
+    for s in ajust["segments"]:
+        xm = (np.log10(s["f1"]) + np.log10(s["f2"])) / 2
+        ym = ajust["modele"]([xm])[0]
+        fig.add_trace(go.Scatter(x=[10 ** xm], y=[10 ** ym * decal], mode="text", showlegend=False,
+                                 text=[f"<b>{s['pente']:.2f}</b>"], textfont=dict(color=coul, size=12),
+                                 hovertext=f"{nom} : pente {s['pente']:.2f} ± {s['err']:.2f}<br>"
+                                           f"{s['f1']:.3g} – {s['f2']:.3g} Hz", hoverinfo="text"),
+                      row=row, col=col)
+    for fb in ajust["ruptures"]:
+        fig.add_shape(type="line", xref=xd, yref=f"{yd} domain", x0=fb, x1=fb, y0=0, y1=0.88,
+                      line=dict(color=coul, dash="dot", width=1.3))
+        fig.add_trace(go.Scatter(x=[fb], y=[10 ** ajust["modele"]([np.log10(fb)])[0]], mode="markers",
+                                 marker=dict(color=coul, size=9, symbol="diamond"), showlegend=False,
+                                 hovertemplate=f"rupture {nom} : {fb:.3g} Hz<extra></extra>"), row=row, col=col)
+
+
+def tracer_manuelles(fig, pentes, attente, row, col):
+    for i, p in enumerate(pentes, 1):
+        a = pente_manuelle(p)
+        fig.add_trace(go.Scatter(x=[p["f1"], p["f2"]], y=[p["p1"], p["p2"]], mode="lines+markers",
+                                 line=dict(color=COUL_MANUELLE, width=2), marker=dict(size=7),
+                                 name="pentes manuelles", legendgroup="man", showlegend=(i == 1),
+                                 hovertemplate=f"m{i} : pente {a:.2f}<extra></extra>"), row=row, col=col)
+        fm, pm = np.sqrt(p["f1"] * p["f2"]), np.sqrt(p["p1"] * p["p2"])
+        fig.add_trace(go.Scatter(x=[fm], y=[pm / 2.5], mode="text", text=[f"m{i} : {a:.2f}"], showlegend=False,
+                                 textfont=dict(color=COUL_MANUELLE, size=12), hoverinfo="skip"), row=row, col=col)
+    if attente:
+        fig.add_trace(go.Scatter(x=[attente["f"]], y=[attente["p"]], mode="markers", showlegend=False,
+                                 marker=dict(color=COUL_MANUELLE, size=13, symbol="x-thin-open",
+                                             line=dict(width=3)),
+                                 hovertemplate="1er point de la pente : cliquer le 2nd<extra></extra>"),
+                      row=row, col=col)
+
+
+def titre_psd(d, sel, cible):
+    if cible == "fen":
+        return f"PSD de la fenêtre ×{d['facteur']:g} ({d['wd']:%H:%M:%S} → {d['wf']:%H:%M:%S})"
+    a, b = parse_date(sel[0]), parse_date(sel[1])
+    nature = " = évènement" if (a, b) == (d["deb"], d["fin"]) else ""
+    return f"PSD sélection{nature} : {fmt_date(a)} → {b:%H:%M:%S} UTC ({(b - a).total_seconds():.1f} s)"
+
+
+def construire_psd(cle, sel, cible, reglages, pentes, attente):
+    """Figure de PSD + résumé des pentes pour la fenêtre (cible "fen") ou la sélection (cible "sel")."""
+    horizontal = cible == "sel"
+    height = 500 if horizontal else 620
+    if not cle or cle not in MEMOIRE:
+        return fig_vide("Choisir un intervalle puis « Charger »", height), ""
+    if cible == "sel" and not sel:
+        return fig_vide("Aucune zone sélectionnée", height), ""
+    r = psd(cle, sel if cible == "sel" else None)
+    titre = titre_psd(MEMOIRE[cle], sel, cible)
+    if isinstance(r, str):
+        return fig_vide(f"{titre}<br>{r}", height), ""
+
     sous_titres = [f"⟨|B|⟩ = {r['B_moy']:.1f} ± {r['B_std']:.1f} nT, fs = {r['fs']:.1f} Hz, N = {r['N']}",
                    f"zoom linéaire, Δf = {1e3 * r['f'][1]:.2f} mHz"]
     if horizontal:
-        fig = make_subplots(rows=1, cols=2, subplot_titles=sous_titres, horizontal_spacing=0.08)
+        fig = make_subplots(rows=1, cols=2, subplot_titles=sous_titres, horizontal_spacing=0.08,
+                            column_widths=[0.62, 0.38])
         pos = [(1, 1), (1, 2)]
     else:
-        fig = make_subplots(rows=2, cols=1, subplot_titles=sous_titres, vertical_spacing=0.17)
+        fig = make_subplots(rows=2, cols=1, subplot_titles=sous_titres, vertical_spacing=0.17,
+                            row_heights=[0.6, 0.4])
         pos = [(1, 1), (2, 1)]
-    tracer_psd_panneau(fig, r, *pos[0], log_x=True, legende=True, nom_axe_x="Fréquence [Hz]")
-    tracer_psd_panneau(fig, r, *pos[1], log_x=False, legende=False, nom_axe_x="Fréquence [Hz]")
+    lissage = fmt_num(reglages.get("lissage"), 0)
+    ions = ions_choisis(reglages)
+    tracer_psd_panneau(fig, r, *pos[0], log_x=True, legende=True, lissage=lissage, ions=ions)
+    tracer_psd_panneau(fig, r, *pos[1], log_x=False, legende=False, lissage=lissage, ions=ions)
+
+    # Pentes automatiques
+    resume = []
+    mode = reglages.get("ajustement") or "aucun"
+    if mode != "aucun":
+        fmin = fmt_num(reglages.get("fmin"), FIT_FMIN)
+        fmax = fmt_num(reglages.get("fmax"), FIT_FMAX)
+        for comp in composantes_choisies(reglages):
+            nom = COMPOSANTES[comp][0]
+            try:
+                aj = ajustement_cache((cle, tuple(sel) if cible == "sel" else None, comp, fmin, fmax, mode),
+                                      r["f"], r[comp], fmin, fmax, mode)
+            except ValueError as exc:
+                resume.append(html.Div(f"{nom} : {exc}", style={"color": "firebrick"}))
+                continue
+            tracer_ajustement(fig, aj, comp, *pos[0], legende=True)
+            morceaux = [f"{s['pente']:.2f} ± {s['err']:.2f} ({s['f1']:.3g}–{s['f2']:.3g} Hz)"
+                        for s in aj["segments"]]
+            ruptures = ", ".join(f"{fb:.3g} Hz" for fb in aj["ruptures"]) or "aucune"
+            resume.append(html.Div([html.B(f"{nom} : "), f"pentes {' | '.join(morceaux)} — ruptures : {ruptures}"
+                                    + (" (nombre choisi par BIC)" if aj["auto"] else "")],
+                                   style={"color": COMPOSANTES[comp][2]}))
+    # Pentes manuelles
+    mes_pentes = [p for p in (pentes or []) if p["fig"] == cible]
+    mon_attente = attente if attente and attente.get("fig") == cible else None
+    tracer_manuelles(fig, mes_pentes, mon_attente, *pos[0])
+    if mes_pentes:
+        resume.append(html.Div(
+            [html.B("Manuelles : ")] + [f"m{i} = {pente_manuelle(p):.2f} ({p['f1']:.3g}→{p['f2']:.3g} Hz)   "
+                                        for i, p in enumerate(mes_pentes, 1)],
+            style={"color": COUL_MANUELLE}))
+
     fig.update_annotations(font_size=11, selector=dict(text=sous_titres[0]))
     fig.update_annotations(font_size=11, selector=dict(text=sous_titres[1]))
     fig.update_layout(title=dict(text=titre, font_size=13), height=height, template="plotly_white",
                       margin=dict(l=65, r=15, t=70, b=45), hovermode="closest",
-                      legend=dict(orientation="h", x=0, y=-0.12 if horizontal else -0.08))
-    return fig
-
-
-def psd_ou_message(t, B, titre, horizontal, height):
-    try:
-        r = tr.calcul_psd(t, B)
-    except tr.DonneesInsuffisantes as exc:
-        return fig_vide(f"{titre}<br>{exc}", height), str(exc)
-    return fig_psd(r, titre, horizontal, height), ""
+                      uirevision=f"{cle}|{sel if cible == 'sel' else ''}",
+                      legend=dict(orientation="h", x=0, y=-0.13 if horizontal else -0.08, font_size=11))
+    return fig, resume
 
 
 def disque_mercure(fig, row, col):
@@ -255,7 +644,9 @@ def disque_mercure(fig, row, col):
                                  showlegend=False), row=row, col=col)
 
 
-def fig_orbite(d, sel=None):
+def fig_orbite(cle, sel=None):
+    """Orbite sur la fenêtre (X-Y, X-Z) et position en fonction du temps."""
+    d = MEMOIRE[cle]
     xyz = d["xyz"]
     if xyz is None:
         return fig_vide("pas de données de position", 420)
@@ -264,6 +655,11 @@ def fig_orbite(d, sel=None):
     tp, P = tp[ok], P[ok]
     if len(tp) < 2:
         return fig_vide("position insuffisante", 420)
+    pas = max(1, int(np.ceil(len(tp) / MAX_POINTS_ORBITE)))
+    garde = np.zeros(len(tp), bool)
+    garde[::pas] = True
+    garde[[0, -1]] = True
+    tp, P = tp[garde], P[garde]
     x, y, z = P.T
     r = np.linalg.norm(P, axis=1)
     alt = (r - 1.0) * tr.R_MERCURE_KM
@@ -278,9 +674,12 @@ def fig_orbite(d, sel=None):
                         specs=[[{"rowspan": 3}, {"rowspan": 3}, {}], [None, None, {}], [None, None, {}]],
                         subplot_titles=["X-Y, vue du nord (Soleil à droite)", "X-Z, vue depuis l'aube (−Y)",
                                         "position de MESSENGER", "", ""],
-                        horizontal_spacing=0.07, vertical_spacing=0.05, shared_xaxes=False)
+                        horizontal_spacing=0.07, vertical_spacing=0.05)
     survol = "%{customdata}<br>(%{x:.3f}, %{y:.3f}) R_M<extra></extra>"
     temps_txt = np.datetime_as_string(tp, unit="s")
+    morceaux = [(np.ones_like(dans), "trajectoire (fenêtre)", dict(color="gray", width=1.2)),
+                (dans, "évènement", dict(color="red", width=3.5)),
+                (dans_sel, "sélection", dict(color="purple", width=5))]
     for col, v, yl, mp in ((1, y, "Y_MSO [R_M]", [mp_rho, -mp_rho]),
                            (2, z, "Z_MSO [R_M]", [tr.Z_DIP + mp_rho, tr.Z_DIP - mp_rho])):
         disque_mercure(fig, 1, col)
@@ -288,18 +687,12 @@ def fig_orbite(d, sel=None):
             fig.add_trace(go.Scatter(x=mp_x, y=cy, mode="lines", line=dict(color="darkorange", width=1),
                                      name="magnétopause (Winslow+2013)", legendgroup="mp",
                                      showlegend=(col == 1 and i == 0), hoverinfo="skip"), row=1, col=col)
-        fig.add_trace(go.Scatter(x=x, y=v, mode="lines", line=dict(color="gray", width=1.2),
-                                 name="trajectoire (fenêtre)", legendgroup="traj", showlegend=col == 1,
-                                 customdata=temps_txt, hovertemplate=survol), row=1, col=col)
-        if dans.any():
-            fig.add_trace(go.Scatter(x=x[dans], y=v[dans], mode="lines", line=dict(color="red", width=3.5),
-                                     name="évènement", legendgroup="evt", showlegend=col == 1,
-                                     customdata=temps_txt[dans], hovertemplate=survol), row=1, col=col)
-        if dans_sel.any():
-            fig.add_trace(go.Scatter(x=x[dans_sel], y=v[dans_sel], mode="lines",
-                                     line=dict(color="purple", width=5), name="sélection", legendgroup="sel",
-                                     showlegend=col == 1, customdata=temps_txt[dans_sel],
-                                     hovertemplate=survol), row=1, col=col)
+        for masque, nom, ligne in morceaux:
+            if masque.any():
+                fig.add_trace(go.Scatter(x=np.where(masque, x, np.nan), y=np.where(masque, v, np.nan),
+                                         mode="lines", line=ligne, name=nom, legendgroup=nom,
+                                         showlegend=col == 1, customdata=temps_txt, hovertemplate=survol),
+                              row=1, col=col)
         fig.add_trace(go.Scatter(x=[x[0]], y=[v[0]], mode="markers", marker=dict(color="royalblue", size=9),
                                  name="début fenêtre", legendgroup="d", showlegend=col == 1,
                                  hoverinfo="skip"), row=1, col=col)
@@ -307,43 +700,42 @@ def fig_orbite(d, sel=None):
                                  marker=dict(color="black", size=9, symbol="square"),
                                  name="fin fenêtre", legendgroup="f", showlegend=col == 1,
                                  hoverinfo="skip"), row=1, col=col)
-        # sens de parcours au milieu de la trajectoire
+        # sens de parcours, au milieu de la trajectoire (donc au centre de l'évènement)
         n = len(x)
         m = max(1, n // 10)
         a, b = max(0, n // 2 - m), min(n - 1, n // 2 + m)
-        xd = "x" if col == 1 else "x2"
-        yd = "y" if col == 1 else "y2"
-        fig.add_annotation(x=x[b], y=v[b], ax=x[a], ay=v[a], xref=xd, yref=yd, axref=xd, ayref=yd,
-                           showarrow=True, arrowhead=2, arrowsize=1.5, arrowwidth=1.6, text="")
+        if b > a:
+            xd, yd = ("x", "y") if col == 1 else ("x2", "y2")
+            fig.add_annotation(x=x[b], y=v[b], ax=x[a], ay=v[a], xref=xd, yref=yd, axref=xd, ayref=yd,
+                               showarrow=True, arrowhead=2, arrowsize=1.5, arrowwidth=1.6, text="")
         u_all, v_all = np.r_[x, -1.1, 1.1], np.r_[v, -1.1, 1.1]
         mu, mv = 0.15 * np.ptp(u_all), 0.15 * np.ptp(v_all)
         fig.update_xaxes(range=[u_all.min() - mu, u_all.max() + mu], title_text="X_MSO [R_M]", row=1, col=col)
         fig.update_yaxes(range=[v_all.min() - mv, v_all.max() + mv], title_text=yl,
-                         scaleanchor=xd, scaleratio=1, row=1, col=col)
+                         scaleanchor="x" if col == 1 else "x2", scaleratio=1, row=1, col=col)
     # rotation de Mercure dans la vue du nord : antihoraire (crépuscule en +Y, aube en −Y)
-    for (x0, x1, yy, txt, pos) in ((0.3, -0.3, 1.15, "crépuscule (+Y)", "top"),
-                                   (-0.3, 0.3, -1.15, "aube (−Y)", "bottom")):
+    for (x0, x1, yy, txt, haut) in ((0.3, -0.3, 1.15, "crépuscule (+Y)", True),
+                                    (-0.3, 0.3, -1.15, "aube (−Y)", False)):
         fig.add_annotation(x=x1, y=yy, ax=x0, ay=yy, xref="x", yref="y", axref="x", ayref="y",
                            showarrow=True, arrowhead=2, arrowwidth=1.3, text="")
-        fig.add_annotation(x=0, y=yy + (0.12 if pos == "top" else -0.12), xref="x", yref="y", text=txt,
+        fig.add_annotation(x=0, y=yy + (0.12 if haut else -0.12), xref="x", yref="y", text=txt,
                            showarrow=False, font=dict(size=10))
 
     # position en fonction du temps
-    lignes_pos = [(alt, "altitude [km]", 1), (lat, "latitude [°]", 2), (lt, "heure locale [h]", 3)]
-    for v, lab, row in lignes_pos:
-        fig.add_trace(go.Scatter(x=tp, y=v, mode="lines", line=dict(color="dimgray", width=1.3),
-                                 showlegend=False, hovertemplate="%{x|%H:%M:%S}<br>" + lab + " = %{y:.2f}<extra></extra>"),
+    for v, lab, row in ((alt, "altitude [km]", 1), (lat, "latitude [°]", 2), (lt, "heure locale [h]", 3)):
+        fig.add_trace(go.Scatter(x=tp, y=v, mode="lines", line=dict(color="dimgray", width=1.3), showlegend=False,
+                                 hovertemplate="%{x|%H:%M:%S}<br>" + lab + " = %{y:.2f}<extra></extra>"),
                       row=row, col=3)
         fig.update_yaxes(title_text=lab, title_font_size=10, row=row, col=3)
-        fig.add_vrect(x0=d["deb"], x1=d["fin"], fillcolor=COUL_EVT, line_width=0, layer="below", row=row, col=3)
-        if sel:
-            fig.add_vrect(x0=sel[0], x1=sel[1], fillcolor=COUL_SEL, line_width=0, layer="below", row=row, col=3)
+        for a, b, coul in [(d["deb"], d["fin"], COUL_EVT)] + \
+                          ([(sel[0], sel[1], COUL_SEL)] if sel else []):
+            fig.add_vrect(x0=a, x1=b, fillcolor=coul, line_width=0, layer="below", row=row, col=3)
         fig.update_xaxes(tickformat="%H:%M", showticklabels=(row == 3), row=row, col=3)
         if row > 1:
             fig.update_xaxes(matches="x3", row=row, col=3)
     fig.add_hline(y=0, line=dict(color="black", dash="dot", width=0.8), row=2, col=3)
     fig.update_xaxes(title_text="UTC", row=3, col=3)
-    fig.update_layout(height=520, template="plotly_white", uirevision="orbite",
+    fig.update_layout(height=540, template="plotly_white", uirevision=cle,
                       margin=dict(l=60, r=15, t=40, b=40),
                       legend=dict(orientation="h", x=0, y=-0.14, font_size=11))
     return fig
@@ -360,13 +752,32 @@ def options_evenements():
     return opts
 
 
+def options_ions():
+    return [{"label": f"{ion} (A={A}, q={q})", "value": ion} for ion, (A, q) in IONS_DISPO.items()]
+
+
 STYLE_CHAMP = {"width": "190px", "padding": "4px", "fontFamily": "monospace"}
+STYLE_PETIT = {"width": "70px", "padding": "4px"}
 STYLE_BOUTON = {"padding": "6px 14px", "cursor": "pointer", "fontWeight": "bold"}
+STYLE_BOUTON2 = {"padding": "5px 10px", "cursor": "pointer"}
 STYLE_BLOC = {"display": "flex", "gap": "10px", "alignItems": "center", "flexWrap": "wrap"}
+STYLE_CADRE = STYLE_BLOC | {"background": "#f5f5f7", "padding": "8px 12px", "borderRadius": "6px", "margin": "6px 0"}
+STYLE_RESUME = {"fontSize": "13px", "fontFamily": "monospace", "margin": "2px 0 8px", "lineHeight": "1.6"}
+STYLE_FACTEUR = {"background": "rgba(31,119,180,0.15)", "border": "1px solid rgba(31,119,180,0.6)",
+                 "borderRadius": "5px", "padding": "3px 8px", "display": "flex", "gap": "6px",
+                 "alignItems": "center"}
 
 app = Dash(__name__, title="MESSENGER — KH explorer")
 app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "10px 18px"}, children=[
-    html.H3("MESSENGER — exploration interactive (B, PSD, orbite)", style={"margin": "4px 0 10px"}),
+    html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"}, children=[
+        html.H3("MESSENGER — exploration interactive (B, PSD, orbite)", style={"margin": "4px 0 10px"}),
+        html.Div(style=STYLE_BLOC, children=[
+            html.Button("💾 Sauvegarder la configuration", id="btn-sauver", style=STYLE_BOUTON2),
+            dcc.Upload(html.Button("📂 Importer une configuration", style=STYLE_BOUTON2), id="importer",
+                       accept=".json,application/json"),
+            dcc.Download(id="telechargement"),
+        ]),
+    ]),
 
     html.Div(style=STYLE_BLOC, children=[
         dcc.Dropdown(id="choix-evt", options=options_evenements(), placeholder="Évènement de events.py…",
@@ -375,40 +786,90 @@ app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "
                                        debounce=True),
         html.Label("fin"), dcc.Input(id="fin", type="text", value="2011-05-15 09:31", style=STYLE_CHAMP,
                                      debounce=True),
-        html.Label("facteur fenêtre"), dcc.Input(id="facteur", type="number", value=tr.FACTEUR_FENETRE, min=1,
-                                                 step=0.5, style={"width": "70px", "padding": "4px"}),
+        html.Div(style=STYLE_FACTEUR, children=[
+            html.Label("facteur fenêtre"),
+            dcc.Input(id="facteur", type="number", value=tr.FACTEUR_FENETRE, min=1, step=0.5, style=STYLE_PETIT)]),
         dcc.Checklist(id="force", options=[{"label": " retélécharger depuis AMDA", "value": "force"}], value=[]),
         html.Button("Charger", id="btn-charger", style=STYLE_BOUTON),
     ]),
     dcc.Loading(html.Div(id="statut", style={"margin": "8px 0", "fontSize": "14px"}), type="dot"),
 
+    # Réglages communs aux deux PSD
+    html.Div(style=STYLE_CADRE, children=[
+        html.B("Réglages PSD"),
+        html.Label("ions"),
+        dcc.Dropdown(id="ions", options=options_ions(), value=list(tr.IONS), multi=True,
+                     placeholder="aucune fréquence cyclotron", style={"minWidth": "330px"}),
+        html.Label("lissage (décade)"),
+        html.Div(dcc.Slider(id="lissage", min=0, max=0.5, step=0.01, value=0,
+                            marks={0: "aucun", 0.1: "0,1", 0.2: "0,2", 0.3: "0,3", 0.4: "0,4", 0.5: "0,5"},
+                            tooltip={"placement": "bottom"}), style={"width": "280px"}),
+    ]),
+    html.Div(style=STYLE_CADRE, children=[
+        html.Label("pentes auto"),
+        dcc.Dropdown(id="ajustement", value="auto", clearable=False, style={"width": "190px"},
+                     options=[{"label": "aucune", "value": "aucun"},
+                              {"label": "ruptures : auto (BIC)", "value": "auto"},
+                              {"label": "1 rupture", "value": "1"},
+                              {"label": "2 ruptures", "value": "2"},
+                              {"label": "3 ruptures", "value": "3"}]),
+        dcc.Dropdown(id="composante", value="perp", clearable=False, style={"width": "110px"},
+                     options=[{"label": "P⊥", "value": "perp"}, {"label": "P∥", "value": "para"},
+                              {"label": "P⊥ et P∥", "value": "both"}]),
+        html.Label("de"), dcc.Input(id="fmin", type="number", value=FIT_FMIN, min=0, step="any",
+                                    debounce=True, style=STYLE_PETIT),
+        html.Label("à"), dcc.Input(id="fmax", type="number", value=FIT_FMAX, min=0, step="any",
+                                   debounce=True, style=STYLE_PETIT),
+        html.Label("Hz"),
+        html.Span("|", style={"color": "#aaa"}),
+        dcc.Checklist(id="mode-manuel", options=[{"label": " pente manuelle (2 clics sur le log-log)",
+                                                  "value": "on"}], value=[]),
+        html.Button("annuler la dernière", id="btn-annuler", style=STYLE_BOUTON2),
+        html.Button("effacer", id="btn-effacer", style=STYLE_BOUTON2),
+    ]),
+
     html.Div(style={"display": "flex", "gap": "8px"}, children=[
-        html.Div(dcc.Graph(id="fig-b", figure=fig_vide("Choisir un intervalle puis « Charger »", 620),
-                           config=CONFIG_FIG), style={"flex": "2.1", "minWidth": 0}),
-        html.Div(dcc.Graph(id="fig-psd-fen", figure=fig_vide("PSD de la fenêtre", 620), config=CONFIG_FIG),
+        html.Div([dcc.Graph(id="fig-b", figure=fig_vide("Choisir un intervalle puis « Charger »", 620),
+                            config=CONFIG_FIG),
+                  html.Div(style=STYLE_BLOC, children=[
+                      html.Button("↺ fenêtre initiale", id="btn-recentrer",
+                                  style=STYLE_BOUTON | {"background": "rgba(31,119,180,0.15)"},
+                                  title="revenir à la fenêtre ×facteur, bornes de B recalées sur cette fenêtre"),
+                      dcc.Checklist(id="auto-y", value=["on"], style={"fontSize": "13px"},
+                                    options=[{"label": " bornes de B = min / max de la zone affichée", "value": "on"}]),
+                      html.Span("orange : évènement — violet : sélection",
+                                style={"fontSize": "12px", "color": "#555"})])],
+                 style={"flex": "2.1", "minWidth": 0}),
+        html.Div([dcc.Graph(id="fig-psd-fen", figure=fig_vide("PSD de la fenêtre", 620), config=CONFIG_FIG),
+                  html.Div(id="resume-fen", style=STYLE_RESUME)],
                  style={"flex": "1", "minWidth": 0}),
     ]),
 
     html.H4("PSD d'une zone sélectionnée", style={"margin": "14px 0 6px"}),
     html.Div("Outil « Box Select » de la barre Plotly sur les courbes de B (calcul automatique), "
-             "ou bornes saisies à la main, ou zone actuellement affichée.",
+             "bornes saisies à la main, zone actuellement affichée, ou évènement seul.",
              style={"fontSize": "13px", "color": "#555", "marginBottom": "6px"}),
     html.Div(style=STYLE_BLOC, children=[
         html.Label("début"), dcc.Input(id="sel-debut", type="text", style=STYLE_CHAMP | {"width": "230px"}),
         html.Label("fin"), dcc.Input(id="sel-fin", type="text", style=STYLE_CHAMP | {"width": "230px"}),
         html.Button("PSD sur ces bornes", id="btn-sel", style=STYLE_BOUTON),
         html.Button("PSD de la zone affichée", id="btn-vue", style=STYLE_BOUTON),
+        html.Button("PSD de l'évènement seul", id="btn-evt", style=STYLE_BOUTON | {"background": "#ffe2c6"}),
         html.Span(id="statut-sel", style={"fontSize": "13px"}),
     ]),
-    dcc.Loading(dcc.Graph(id="fig-psd-sel", figure=fig_vide("Aucune zone sélectionnée", 480),
+    dcc.Loading(dcc.Graph(id="fig-psd-sel", figure=fig_vide("Aucune zone sélectionnée", 500),
                           config=CONFIG_FIG), type="dot"),
+    html.Div(id="resume-sel", style=STYLE_RESUME),
 
     html.H4("Orbite et position", style={"margin": "14px 0 6px"}),
-    dcc.Graph(id="fig-orbite", figure=fig_vide("", 520), config=CONFIG_FIG),
+    dcc.Graph(id="fig-orbite", figure=fig_vide("", 540), config=CONFIG_FIG),
 
     dcc.Store(id="cle"),
     dcc.Store(id="vue"),
     dcc.Store(id="selection"),
+    dcc.Store(id="pentes-man", data=[]),
+    dcc.Store(id="pente-attente"),
+    dcc.Store(id="config-importee"),
 ])
 
 
@@ -423,68 +884,93 @@ def choisir_evenement(val):
 
 
 @app.callback(Output("cle", "data"), Output("statut", "children"), Output("fig-b", "figure"),
-              Output("fig-psd-fen", "figure"), Output("selection", "data", allow_duplicate=True),
-              Input("btn-charger", "n_clicks"),
+              Output("selection", "data", allow_duplicate=True), Output("vue", "data", allow_duplicate=True),
+              Output("pentes-man", "data", allow_duplicate=True),
+              Output("pente-attente", "data", allow_duplicate=True),
+              Input("btn-charger", "n_clicks"), Input("config-importee", "data"),
               State("debut", "value"), State("fin", "value"), State("facteur", "value"), State("force", "value"),
               prevent_initial_call=True)
-def bouton_charger(_, debut, fin, facteur, force):
+def bouton_charger(_, config, debut, fin, facteur, force):
+    depuis_config = ctx.triggered_id == "config-importee"
+    if depuis_config:
+        if not config:
+            return (no_update,) * 7
+        debut, fin = config.get("debut"), config.get("fin")
+        facteur = config.get("facteur")
     try:
         deb, fin_ = parse_date(debut), parse_date(fin)
         if fin_ <= deb:
             raise ValueError("la fin doit être postérieure au début")
-        facteur = max(1.0, float(facteur or tr.FACTEUR_FENETRE))
+        facteur = max(1.0, fmt_num(facteur, tr.FACTEUR_FENETRE))
         cle = charger(deb, fin_, facteur, bool(force))
     except (ValueError, tr.DonneesInsuffisantes) as exc:
-        return no_update, html.Span(str(exc), style={"color": "firebrick"}), no_update, no_update, no_update
+        return (no_update, html.Span(str(exc), style={"color": "firebrick"})) + (no_update,) * 5
     except Exception as exc:  # réseau, AMDA, speasy…
-        return (no_update, html.Span(f"{type(exc).__name__} : {exc}", style={"color": "firebrick"}),
-                no_update, no_update, no_update)
+        return ((no_update, html.Span(f"{type(exc).__name__} : {exc}", style={"color": "firebrick"}))
+                + (no_update,) * 5)
     d = MEMOIRE[cle]
-    fig_p, err = psd_ou_message(d["t"], d["B"], "PSD de la fenêtre affichée", horizontal=False, height=620)
-    notes = d["notes"] + ([err] if err else [])
-    statut = html.Span(f"Chargé : {fmt_date(d['wd'])} → {fmt_date(d['wf'])} — " + " ; ".join(notes),
-                       style={"color": "darkgreen"})
-    return cle, statut, fig_b(d), fig_p, None
+    texte = f"Chargé : {fmt_date(d['wd'])} → {fmt_date(d['wf'])} — " + " ; ".join(d["notes"])
+    if depuis_config:
+        sel, vue, pentes = config.get("selection"), config.get("vue"), config.get("pentes_manuelles") or []
+        attente = config.get("pente_en_cours")
+        texte = "Configuration importée. " + texte
+    else:
+        sel, vue, pentes, attente = None, None, [], None
+    return cle, html.Span(texte, style={"color": "darkgreen"}), fig_b(cle, vue, sel), sel, vue, pentes, attente
 
 
-@app.callback(Output("selection", "data"), Output("sel-debut", "value"), Output("sel-fin", "value"),
-              Output("statut-sel", "children"),
+@app.callback(Output("selection", "data"), Output("statut-sel", "children"),
+              Output("pentes-man", "data", allow_duplicate=True),
+              Output("pente-attente", "data", allow_duplicate=True),
               Input("fig-b", "selectedData"), Input("btn-sel", "n_clicks"), Input("btn-vue", "n_clicks"),
+              Input("btn-evt", "n_clicks"),
               State("sel-debut", "value"), State("sel-fin", "value"), State("vue", "data"), State("cle", "data"),
+              State("pentes-man", "data"), State("pente-attente", "data"),
               prevent_initial_call=True)
-def definir_selection(selected, _b1, _b2, s_deb, s_fin, vue, cle):
+def definir_selection(selected, _b1, _b2, _b3, s_deb, s_fin, vue, cle, pentes, attente):
     if not cle or cle not in MEMOIRE:
-        return no_update, no_update, no_update, "charger d'abord des données"
+        return no_update, "charger d'abord des données", no_update, no_update
+    d = MEMOIRE[cle]
     try:
         if ctx.triggered_id == "fig-b":
             if not selected or not selected.get("range"):
-                return no_update, no_update, no_update, no_update
+                return (no_update,) * 4
             # la zone vient du sous-graphe où la boîte a été tracée (clé x, x2, x3 ou x4)
             xr = next(v for k, v in selected["range"].items() if k.startswith("x"))
             a, b = parse_date(xr[0]), parse_date(xr[1])
         elif ctx.triggered_id == "btn-vue":
-            d = MEMOIRE[cle]
             a, b = (parse_date(vue[0]), parse_date(vue[1])) if vue else (d["wd"], d["wf"])
             a, b = max(a, d["wd"]), min(b, d["wf"])
+        elif ctx.triggered_id == "btn-evt":
+            a, b = d["deb"], d["fin"]
         else:
             a, b = parse_date(s_deb), parse_date(s_fin)
     except (ValueError, StopIteration) as exc:
-        return no_update, no_update, no_update, html.Span(str(exc), style={"color": "firebrick"})
+        return no_update, html.Span(str(exc), style={"color": "firebrick"}), no_update, no_update
     if b < a:
         a, b = b, a
-    txt_a, txt_b = f"{a:%Y-%m-%d %H:%M:%S.%f}"[:-3], f"{b:%Y-%m-%d %H:%M:%S.%f}"[:-3]
-    return [txt_a, txt_b], txt_a, txt_b, ""
+    # Les pentes manuelles de l'ancienne sélection n'ont plus de sens sur la nouvelle PSD
+    pentes = [p for p in (pentes or []) if p["fig"] != "sel"]
+    attente = None if attente and attente.get("fig") == "sel" else attente
+    return [fmt_date(a, ms=True), fmt_date(b, ms=True)], "", pentes, attente
 
 
-@app.callback(Output("vue", "data"), Input("fig-b", "relayoutData"), Input("cle", "data"),
+@app.callback(Output("sel-debut", "value"), Output("sel-fin", "value"),
+              Input("selection", "data"), prevent_initial_call=True)
+def afficher_bornes(sel):
+    return (sel[0], sel[1]) if sel else ("", "")
+
+
+@app.callback(Output("vue", "data"), Input("fig-b", "relayoutData"), State("cle", "data"),
               prevent_initial_call=True)
 def suivre_vue(relayout, cle):
     """Mémorise la plage de temps affichée (zoom / pan), quel que soit le sous-graphe manipulé."""
-    if ctx.triggered_id == "cle" or not relayout:
-        return None if ctx.triggered_id == "cle" else no_update
+    if not relayout:
+        return no_update
     for k, v in relayout.items():
         if re.fullmatch(r"xaxis\d*\.autorange", k) and v:
-            return None
+            d = MEMOIRE.get(cle)
+            return [fmt_date(d["wd"]), fmt_date(d["wf"])] if d else None
         if re.fullmatch(r"xaxis\d*\.range\[0\]", k):
             return [str(v), str(relayout[k.replace("[0]", "[1]")])]
         if re.fullmatch(r"xaxis\d*\.range", k):
@@ -492,23 +978,116 @@ def suivre_vue(relayout, cle):
     return no_update
 
 
-@app.callback(Output("fig-psd-sel", "figure"), Output("fig-b", "figure", allow_duplicate=True),
-              Input("selection", "data"), State("cle", "data"), prevent_initial_call=True)
-def psd_selection(sel, cle):
+@app.callback(Output("fig-b", "figure", allow_duplicate=True), Output("vue", "data", allow_duplicate=True),
+              Input("btn-recentrer", "n_clicks"), State("cle", "data"), prevent_initial_call=True)
+def recadrer(n_r, cle):
+    """Ramène la vue de B sur la fenêtre initiale, avec des bornes de B recalées sur ses données."""
     if not cle or cle not in MEMOIRE:
         return no_update, no_update
     d = MEMOIRE[cle]
+    a, b = d["wd"], d["wf"]
     patch = Patch()
-    if not sel:
-        patch["layout"]["shapes"] = formes_b(d)
-        return fig_vide("Aucune zone sélectionnée", 480), patch
-    a, b = parse_date(sel[0]), parse_date(sel[1])
-    m = (d["t"] >= np.datetime64(a)) & (d["t"] <= np.datetime64(b))
-    duree = (b - a).total_seconds()
-    titre = f"PSD sélection : {a:%Y-%m-%d %H:%M:%S} → {b:%H:%M:%S} UTC ({duree:.1f} s, {int(m.sum())} points)"
-    fig, _ = psd_ou_message(d["t"][m], d["B"][m], titre, horizontal=True, height=480)
-    patch["layout"]["shapes"] = formes_b(d, (a, b))
-    return fig, patch
+    # Nouveau uirevision : sinon Plotly garde le zoom de l'utilisateur quand la plage demandée est égale
+    # à celle de la figure d'origine (cas de « ↺ fenêtre »)
+    patch["layout"]["uirevision"] = f"{cle}|{n_r or 0}"
+    for ax in ("xaxis", "xaxis2", "xaxis3", "xaxis4"):
+        patch["layout"][ax]["range"] = [fmt_date(a), fmt_date(b)]
+        patch["layout"][ax]["autorange"] = False
+    for ax, plage in zip(("yaxis", "yaxis2", "yaxis3", "yaxis4"), plages_b(d, a, b)):
+        if plage:
+            patch["layout"][ax]["range"] = plage
+            patch["layout"][ax]["autorange"] = False
+    return patch, [fmt_date(a), fmt_date(b)]
+
+
+@app.callback(Output("fig-b", "figure", allow_duplicate=True),
+              Input("vue", "data"), State("cle", "data"), State("auto-y", "value"), State("fig-b", "relayoutData"),
+              prevent_initial_call=True)
+def raffiner_b(vue, cle, auto_y, relayout):
+    """
+    Pleine résolution dans la zone affichée, min-max ailleurs : n'envoie que les nouvelles données.
+    Si la case est cochée, recale aussi les bornes de chaque panneau de B sur le min / max de la zone affichée,
+    sauf quand l'utilisateur vient lui-même de choisir une plage en B (zoom rectangle).
+    """
+    if not cle or cle not in MEMOIRE:
+        return no_update
+    d = MEMOIRE[cle]
+    patch = Patch()
+    for i, (x, y) in enumerate(donnees_affichees(d, vue)):
+        patch["data"][i]["x"] = x
+        patch["data"][i]["y"] = y
+    zoom_y_utilisateur = any(re.fullmatch(r"yaxis\d*\.range(\[0\])?", k) for k in (relayout or {}))
+    if "on" in (auto_y or []) and not zoom_y_utilisateur:
+        for ax, plage in zip(("yaxis", "yaxis2", "yaxis3", "yaxis4"), plages_b(d, *bornes_vue(d, vue))):
+            if plage:
+                patch["layout"][ax]["range"] = plage
+                patch["layout"][ax]["autorange"] = False
+    return patch
+
+
+@app.callback(Output("fig-b", "figure", allow_duplicate=True),
+              Input("selection", "data"), State("cle", "data"), prevent_initial_call=True)
+def surligner_selection(sel, cle):
+    if not cle or cle not in MEMOIRE:
+        return no_update
+    patch = Patch()
+    s = (parse_date(sel[0]), parse_date(sel[1])) if sel else None
+    patch["layout"]["shapes"] = formes_b(MEMOIRE[cle], s)
+    return patch
+
+
+ENTREES_REGLAGES = [Input("ions", "value"), Input("lissage", "value"), Input("ajustement", "value"),
+                    Input("composante", "value"), Input("fmin", "value"), Input("fmax", "value"),
+                    Input("pentes-man", "data"), Input("pente-attente", "data")]
+
+
+def reglages_dict(ions, lissage, ajustement, composante, fmin, fmax):
+    return dict(ions=ions, lissage=lissage, ajustement=ajustement, composante=composante, fmin=fmin, fmax=fmax)
+
+
+@app.callback(Output("fig-psd-fen", "figure"), Output("resume-fen", "children"),
+              Input("cle", "data"), *ENTREES_REGLAGES, prevent_initial_call=True)
+def psd_fenetre(cle, ions, lissage, ajustement, composante, fmin, fmax, pentes, attente):
+    return construire_psd(cle, None, "fen", reglages_dict(ions, lissage, ajustement, composante, fmin, fmax),
+                          pentes, attente)
+
+
+@app.callback(Output("fig-psd-sel", "figure"), Output("resume-sel", "children"),
+              Input("selection", "data"), *ENTREES_REGLAGES, State("cle", "data"), prevent_initial_call=True)
+def psd_selection(sel, ions, lissage, ajustement, composante, fmin, fmax, pentes, attente, cle):
+    return construire_psd(cle, sel, "sel", reglages_dict(ions, lissage, ajustement, composante, fmin, fmax),
+                          pentes, attente)
+
+
+@app.callback(Output("pentes-man", "data"), Output("pente-attente", "data"),
+              Input("fig-psd-fen", "clickData"), Input("fig-psd-sel", "clickData"),
+              Input("btn-annuler", "n_clicks"), Input("btn-effacer", "n_clicks"),
+              State("mode-manuel", "value"), State("pentes-man", "data"), State("pente-attente", "data"),
+              prevent_initial_call=True)
+def pentes_manuelles(clic_fen, clic_sel, _a, _e, mode, pentes, attente):
+    pentes = list(pentes or [])
+    if ctx.triggered_id == "btn-effacer":
+        return [], None
+    if ctx.triggered_id == "btn-annuler":
+        if attente:
+            return no_update, None
+        return pentes[:-1], no_update
+    if "on" not in (mode or []):
+        return no_update, no_update
+    cible = "fen" if ctx.triggered_id == "fig-psd-fen" else "sel"
+    clic = clic_fen if cible == "fen" else clic_sel
+    if not clic or not clic.get("points"):
+        return no_update, no_update
+    pt = clic["points"][0]
+    if pt.get("customdata") != "log" or not pt.get("x") or not pt.get("y") or pt["x"] <= 0 or pt["y"] <= 0:
+        return no_update, no_update
+    point = dict(fig=cible, f=float(pt["x"]), p=float(pt["y"]))
+    if not attente or attente.get("fig") != cible:
+        return no_update, point
+    if point["f"] == attente["f"]:
+        return no_update, no_update
+    (f1, p1), (f2, p2) = sorted([(attente["f"], attente["p"]), (point["f"], point["p"])])
+    return pentes + [dict(fig=cible, f1=f1, p1=p1, f2=f2, p2=p2)], None
 
 
 @app.callback(Output("fig-orbite", "figure"), Input("cle", "data"), Input("selection", "data"),
@@ -517,7 +1096,138 @@ def orbite(cle, sel):
     if not cle or cle not in MEMOIRE:
         return no_update
     s = (parse_date(sel[0]), parse_date(sel[1])) if sel else None
-    return fig_orbite(MEMOIRE[cle], s)
+    return fig_orbite(cle, s)
+
+
+# ======================================================================
+# Sauvegarde / import de la configuration
+# ======================================================================
+def arrondi(v, n=6):
+    """Nombre à n chiffres significatifs pour un JSON lisible."""
+    return float(f"{float(v):.{n}g}")
+
+
+def resultats_psd(cle, sel, cible, reglages, pentes):
+    """Tout ce qu'affiche une figure de PSD, en clair : caractéristiques, raies cyclotron, pentes auto et manuelles."""
+    if not cle or cle not in MEMOIRE or (cible == "sel" and not sel):
+        return None
+    d = MEMOIRE[cle]
+    r = psd(cle, sel if cible == "sel" else None)
+    sortie = dict(titre=titre_psd(d, sel, cible),
+                  intervalle=list(sel) if cible == "sel" else [fmt_date(d["wd"]), fmt_date(d["wf"])])
+    if isinstance(r, str):
+        sortie["erreur"] = r
+        return sortie
+    sortie.update(N=int(r["N"]), fs_Hz=arrondi(r["fs"]), delta_f_Hz=arrondi(r["f"][1]),
+                  B_moy_nT=arrondi(r["B_moy"]), B_std_nT=arrondi(r["B_std"]),
+                  frequences_cyclotron_Hz={ion: arrondi(tr.cyclo(IONS_DISPO[ion][0], r["B_moy"], IONS_DISPO[ion][1]))
+                                           for ion in ions_choisis(reglages)})
+    mode = reglages.get("ajustement") or "aucun"
+    auto = {}
+    if mode != "aucun":
+        fmin = fmt_num(reglages.get("fmin"), FIT_FMIN)
+        fmax = fmt_num(reglages.get("fmax"), FIT_FMAX)
+        for comp in composantes_choisies(reglages):
+            nom = COMPOSANTES[comp][0]
+            try:
+                aj = ajustement_cache((cle, tuple(sel) if cible == "sel" else None, comp, fmin, fmax, mode),
+                                      r["f"], r[comp], fmin, fmax, mode)
+            except ValueError as exc:
+                auto[nom] = dict(erreur=str(exc))
+                continue
+            auto[nom] = dict(
+                plage_Hz=[fmin, fmax], mode=mode, nb_ruptures=aj["k"],
+                choix_nb_ruptures="BIC" if aj["auto"] else "imposé",
+                ruptures_Hz=[arrondi(fb) for fb in aj["ruptures"]],
+                segments=[dict(f_debut_Hz=arrondi(sg["f1"]), f_fin_Hz=arrondi(sg["f2"]),
+                               pente=arrondi(sg["pente"], 4), ecart_type=arrondi(sg["err"], 3))
+                          for sg in aj["segments"]])
+    sortie["pentes_auto"] = auto
+    sortie["pentes_manuelles"] = [
+        dict(nom=f"m{i}", f1_Hz=arrondi(p["f1"]), psd1=arrondi(p["p1"]), f2_Hz=arrondi(p["f2"]),
+             psd2=arrondi(p["p2"]), pente=arrondi(pente_manuelle(p), 4))
+        for i, p in enumerate([p for p in (pentes or []) if p["fig"] == cible], 1)]
+    return sortie
+
+
+@app.callback(Output("telechargement", "data"), Input("btn-sauver", "n_clicks"),
+              State("cle", "data"), State("debut", "value"), State("fin", "value"), State("facteur", "value"),
+              State("choix-evt", "value"), State("force", "value"),
+              State("selection", "data"), State("vue", "data"), State("ions", "value"), State("lissage", "value"),
+              State("ajustement", "value"), State("composante", "value"), State("fmin", "value"),
+              State("fmax", "value"), State("mode-manuel", "value"), State("pentes-man", "data"),
+              State("pente-attente", "data"), State("auto-y", "value"), prevent_initial_call=True)
+def sauvegarder(_, cle, debut, fin, facteur, choix_evt, force, sel, vue, ions, lissage, ajustement,
+                composante, fmin, fmax, mode_manuel, pentes, attente, auto_y):
+    """
+    Fichier JSON en deux parties :
+      - les réglages (relus par « Importer ») : intervalle, zoom, sélection, réglages PSD, pentes
+        manuelles… ;
+      - "resultats" : tout ce qui est affiché à l'écran, en clair (caractéristiques des PSD, fréquences
+        cyclotron, pentes automatiques avec ruptures et écarts-types, pentes manuelles avec leur valeur).
+        Cette partie sert de trace ; à l'import, les résultats sont recalculés à partir des réglages.
+    """
+    reglages = reglages_dict(ions, lissage, ajustement, composante, fmin, fmax)
+    charge = cle in MEMOIRE
+    if charge:  # intervalle réellement affiché, même si les champs ont été modifiés depuis
+        d = MEMOIRE[cle]
+        debut, fin, facteur = fmt_date(d["deb"]), fmt_date(d["fin"]), d["facteur"]
+    evt = None
+    if choix_evt:
+        groupe, i = choix_evt.split("|")
+        e = tr.GROUPES[groupe][int(i)]
+        evt = dict(groupe=groupe, indice=int(i), debut=e.start, fin=e.end)
+    config = dict(
+        version=VERSION_CONFIG, application="webapp.py (KH-EA-3A)",
+        sauvegarde=f"{datetime.now():%Y-%m-%d %H:%M:%S}",
+        evenement_events_py=evt,
+        debut=debut, fin=fin, facteur=facteur,
+        fenetre=[fmt_date(d["wd"]), fmt_date(d["wf"])] if charge else None,
+        retelecharger_amda=bool(force),
+        vue=vue, echelle_B_auto="on" in (auto_y or []), selection=sel,
+        psd=reglages | dict(mode_pente_manuelle="on" in (mode_manuel or [])),
+        pentes_manuelles=pentes or [], pente_en_cours=attente,
+        resultats=dict(
+            notes_donnees=MEMOIRE[cle]["notes"] if charge else None,
+            psd_fenetre=resultats_psd(cle, sel, "fen", reglages, pentes),
+            psd_selection=resultats_psd(cle, sel, "sel", reglages, pentes)),
+    )
+    try:
+        nom = f"config_{parse_date(debut):%Y-%m-%d_%H%M}.json"
+    except ValueError:
+        nom = "config_webapp.json"
+    return dict(content=json.dumps(config, indent=2, ensure_ascii=False), filename=nom)
+
+
+@app.callback(Output("debut", "value", allow_duplicate=True), Output("fin", "value", allow_duplicate=True),
+              Output("facteur", "value"), Output("ions", "value"),
+              Output("lissage", "value"), Output("ajustement", "value"),
+              Output("composante", "value"), Output("fmin", "value"), Output("fmax", "value"),
+              Output("mode-manuel", "value"), Output("force", "value"), Output("auto-y", "value"),
+              Output("config-importee", "data"), Output("statut", "children", allow_duplicate=True),
+              Output("importer", "contents"),
+              Input("importer", "contents"), State("importer", "filename"), prevent_initial_call=True)
+def importer(contenu, nom_fichier):
+    if not contenu:
+        return (no_update,) * 15
+    try:
+        config = json.loads(base64.b64decode(contenu.split(",", 1)[1]).decode("utf-8"))
+        if not isinstance(config, dict) or "debut" not in config or "fin" not in config:
+            raise ValueError("ce n'est pas une configuration de webapp.py")
+        parse_date(config["debut"]), parse_date(config["fin"])
+    except Exception as exc:
+        return ((no_update,) * 13
+                + (html.Span(f"Import de {nom_fichier} impossible : {exc}", style={"color": "firebrick"}), None))
+    p = config.get("psd") or {}
+    config["_import"] = datetime.now().isoformat()  # force le rechargement même pour le même fichier
+    ions = p.get("ions")
+    return (config["debut"], config["fin"], config.get("facteur", tr.FACTEUR_FENETRE),
+            list(tr.IONS) if ions is None else [i for i in ions if i in IONS_DISPO],
+            p.get("lissage", 0), p.get("ajustement", "auto"), p.get("composante", "perp"),
+            p.get("fmin", FIT_FMIN), p.get("fmax", FIT_FMAX),
+            ["on"] if p.get("mode_pente_manuelle") else [], ["force"] if config.get("retelecharger_amda") else [],
+            [] if config.get("echelle_B_auto") is False else ["on"],
+            config, f"Import de {nom_fichier}…", None)
 
 
 if __name__ == "__main__":
