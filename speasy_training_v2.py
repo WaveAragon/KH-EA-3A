@@ -550,5 +550,8 @@ orbite_3d(positions, valeurs=temps_s, label_valeurs="temps (s)")   # trajectoire
 '''
 
 if __name__ == "__main__":
-    spectro_mag(deb, fin)
+    orbite_3d(positions)
+    #spectro_mag("2012-08-25 06:45", "2012-08-25 07:13")
+
+
 

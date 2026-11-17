@@ -14,3 +14,5 @@ python -m pip install speasy scipy matplotlib
 
 ipython
 #lance la console IPython amelioree
+
+uv pip install dash
