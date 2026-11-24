@@ -33,10 +33,16 @@ Utilisation :
        sur [f min, f max] (0,1-10 Hz par défaut), après regroupement en intervalles réguliers en log(f) pour
        ne pas surpondérer les hautes fréquences. Nombre de ruptures fixé (1 à 3) ou choisi par critère BIC ;
      - pentes manuelles : cocher « pente manuelle » puis cliquer deux points sur le panneau log-log.
-  5. « Sauvegarder » télécharge en JSON tout l'état de l'écran : intervalle, zoom, sélection, réglages,
-     pentes manuelles, et dans "resultats" toutes les valeurs affichées (caractéristiques des PSD, fréquences
+  5. Notes et catégories (en haut) : texte libre sur l'évènement, et étiquettes créées à la volée
+     (« KH/flanc aube » crée un sous-dossier « flanc aube » dans « KH » ; un évènement peut en avoir plusieurs).
+  6. « Sauver dans le projet » écrit tout l'état de l'écran dans data/JSONS/<dates>.json (un fichier par
+     évènement, remplacé à chaque sauvegarde) : intervalle, zoom, sélection, réglages, pentes manuelles, notes,
+     catégories, et dans "resultats" toutes les valeurs affichées (caractéristiques des PSD, fréquences
      cyclotron, pentes automatiques avec ruptures et écarts-types, pentes manuelles avec leur valeur).
-     « Importer » recharge les données correspondantes et remet l'écran dans le même état.
+     « Exporter » télécharge ce même JSON ; « Importer » en ouvre un depuis l'ordinateur.
+  7. L'explorateur à gauche liste data/JSONS par catégorie (un évènement apparaît dans chacune de ses
+     catégories) ; un clic rouvre l'évènement dans l'état sauvegardé. Le menu events.py sert à démarrer
+     l'étude d'un nouvel évènement (✓ = déjà sauvegardé ; ses notes et catégories sont alors reprises).
 """
 import argparse
 import base64
@@ -45,6 +51,7 @@ import json
 import re
 from collections import OrderedDict
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from scipy.optimize import minimize
@@ -52,7 +59,7 @@ from scipy.stats import chi2
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from dash import Dash, Input, Output, State, ctx, dcc, html, no_update, Patch
+from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update, Patch
 
 import traitement as tr
 
@@ -74,7 +81,7 @@ Y_MARGE = 0.08    # marge relative autour du min / max de B dans la zone affich�
 FIT_FMIN, FIT_FMAX = 0.1, 10.0   # Hz, plage par défaut de l'ajustement des pentes
 FIT_NB_BINS = 40                 # intervalles réguliers en log10(f) pour l'ajustement
 FIT_MIN_BINS = 5                 # intervalles minimum par segment (5 sur 40 = 0,25 décade sur 0,1-10 Hz)
-VERSION_CONFIG = 3
+VERSION_CONFIG = 4
 
 # Ions proposés pour les fréquences cyclotron : ceux de traitement.py, plus d'autres ions de l'environnement
 # de Mercure (exosphère, vent solaire)
@@ -89,6 +96,11 @@ COMPOSANTES = {"perp": ("P⊥", "purple", "#4b0055"), "para": ("P∥", "mediumse
 COUL_MANUELLE = "#d62728"
 CONFIG_FIG = {"scrollZoom": True, "displaylogo": False,
               "toImageButtonOptions": {"format": "png", "scale": 2}}
+
+
+# Évènements étudiés : un JSON par évènement dans data/JSONS (nom tiré des dates), classés par étiquettes
+DOSSIER_JSONS = tr.DATA / "JSONS"
+FICHIER_CATEGORIES = DOSSIER_JSONS / "_categories.json"   # catégories créées (même vides)
 
 
 def parse_date(s):
@@ -742,13 +754,142 @@ def fig_orbite(cle, sel=None):
 
 
 # ======================================================================
+# Évènements étudiés (data/JSONS) : fichiers, catégories, arborescence
+# ======================================================================
+def nom_fichier(deb, fin):
+    """Nom du JSON d'un évènement, tiré de ses dates : 2011-05-15_0926-0931.json (secondes si non nulles)."""
+    def hm(d):
+        return f"{d:%H%M}" + (f"{d:%S}" if d.second else "")
+    fin_txt = hm(fin) if fin.date() == deb.date() else f"{fin:%Y-%m-%d}_{hm(fin)}"
+    return f"{deb:%Y-%m-%d}_{hm(deb)}-{fin_txt}.json"
+
+
+def chemin_json(nom):
+    """Chemin d'un JSON de data/JSONS ; refuse tout nom qui sortirait du dossier."""
+    p = DOSSIER_JSONS / Path(nom).name
+    if p.suffix != ".json" or p.name.startswith("_"):
+        raise ValueError(f"nom de fichier invalide : {nom}")
+    return p
+
+
+def lire_json(nom):
+    return json.loads(chemin_json(nom).read_text(encoding="utf-8"))
+
+
+def lister_jsons():
+    """Résumé des JSON de data/JSONS : nom, dates, catégories, notes."""
+    sortie = []
+    if not DOSSIER_JSONS.is_dir():
+        return sortie
+    for p in sorted(DOSSIER_JSONS.glob("*.json")):
+        if p.name.startswith("_"):
+            continue
+        try:
+            c = json.loads(p.read_text(encoding="utf-8"))
+            sortie.append(dict(nom=p.name, debut=str(c.get("debut", "")), fin=str(c.get("fin", "")),
+                               categories=[str(x) for x in c.get("categories") or []],
+                               notes=str(c.get("notes") or "")))
+        except Exception:
+            sortie.append(dict(nom=p.name, debut=p.stem, fin="", categories=["(illisible)"], notes=""))
+    return sortie
+
+
+def categories_connues():
+    cats = set()
+    try:
+        cats |= set(json.loads(FICHIER_CATEGORIES.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    for e in lister_jsons():
+        cats |= set(e["categories"])
+    return sorted(c for c in cats if c)
+
+
+def enregistrer_categories(nouvelles):
+    DOSSIER_JSONS.mkdir(parents=True, exist_ok=True)
+    cats = sorted(set(categories_connues()) | {c for c in nouvelles if c})
+    FICHIER_CATEGORIES.write_text(json.dumps(cats, indent=2, ensure_ascii=False), encoding="utf-8")
+    return cats
+
+
+def nettoyer_categorie(c):
+    """« KH / flanc aube » -> « KH/flanc aube » : les « / » créent des sous-dossiers dans l'explorateur."""
+    return "/".join(x.strip() for x in str(c or "").split("/") if x.strip())
+
+
+def etiquette_evt(e):
+    deb, fin = e["debut"][:16], e["fin"]
+    return f"{deb} → {fin[11:16] if fin[:10] == deb[:10] else fin[:16]}"
+
+
+def arbre(filtre, fermes, courant):
+    """Arborescence façon Finder : un dossier par catégorie (sous-dossiers via « / »), un fichier par évènement."""
+    evts = lister_jsons()
+    f = (filtre or "").strip().lower()
+    if f:
+        evts = [e for e in evts if f in " ".join([e["nom"], e["debut"], e["notes"]] + e["categories"]).lower()]
+    racine = {"_": [], "sous": {}}
+    for e in evts:
+        for cat in (e["categories"] or ["Sans catégorie"]):
+            noeud = racine
+            for morceau in cat.split("/"):
+                noeud = noeud["sous"].setdefault(morceau, {"_": [], "sous": {}})
+            noeud["_"].append(e)
+    if not f:  # catégories créées mais encore vides
+        for cat in categories_connues():
+            noeud = racine
+            for morceau in cat.split("/"):
+                noeud = noeud["sous"].setdefault(morceau, {"_": [], "sous": {}})
+    fermes = set(fermes or [])
+
+    def compte(noeud):
+        return len({e["nom"] for e in noeud["_"]} | {n for s in noeud["sous"].values() for n in compte_noms(s)})
+
+    def compte_noms(noeud):
+        return {e["nom"] for e in noeud["_"]} | {n for s in noeud["sous"].values() for n in compte_noms(s)}
+
+    def rendu(noeud, chemin, prof):
+        lignes = []
+        cles = sorted(noeud["sous"], key=lambda k: (k == "Sans catégorie", k.lower()))
+        for nom in cles:
+            sous, ch = noeud["sous"][nom], f"{chemin}/{nom}" if chemin else nom
+            ouvert = ch not in fermes
+            lignes.append(html.Div(
+                [html.Span("▾" if ouvert else "▸", className="chevron"), html.Span("📂" if ouvert else "📁"),
+                 html.Span(nom, className="nom"), html.Span(str(compte(sous)), className="compte")],
+                id={"type": "dossier", "chemin": ch}, n_clicks=0, className="ligne dossier",
+                style={"paddingLeft": f"{6 + 16 * prof}px"}))
+            if ouvert:
+                lignes += rendu(sous, ch, prof + 1)
+        for e in sorted(noeud["_"], key=lambda e: e["debut"]):
+            lignes.append(html.Div(
+                [html.Span("📝" if e["notes"].strip() else "📄"), html.Span(etiquette_evt(e), className="nom")],
+                id={"type": "fichier", "nom": e["nom"], "dossier": chemin}, n_clicks=0,
+                className="ligne fichier" + (" actif" if e["nom"] == courant else ""),
+                title=(e["notes"][:300] or e["nom"]), style={"paddingLeft": f"{22 + 16 * prof}px"}))
+        return lignes
+
+    lignes = rendu(racine, "", 0)
+    if not lignes:
+        return html.Div("Aucun évènement sauvegardé : charger un évènement puis « Sauver dans le projet ».",
+                        style={"color": "#777", "fontSize": "13px", "padding": "8px"})
+    return lignes
+
+
+# ======================================================================
 # Interface
 # ======================================================================
 def options_evenements():
+    """Menu des évènements de events.py ; ✓ devant ceux qui ont déjà un JSON dans data/JSONS."""
     opts = []
     for groupe, liste in tr.GROUPES.items():
         for i, e in enumerate(liste):
-            opts.append({"label": f"{groupe} — {e.start} → {e.end[-5:]}", "value": f"{groupe}|{i}"})
+            try:
+                fait = chemin_json(nom_fichier(parse_date(e.start), parse_date(e.end))).exists()
+            except ValueError:
+                fait = False
+            opts.append({"label": f"{'✓ ' if fait else ''}{groupe} — {e.start} → {e.end[-5:]}",
+                         "value": f"{groupe}|{i}"})
     return opts
 
 
@@ -768,16 +909,62 @@ STYLE_FACTEUR = {"background": "rgba(31,119,180,0.15)", "border": "1px solid rgb
                  "alignItems": "center"}
 
 app = Dash(__name__, title="MESSENGER — KH explorer")
-app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "10px 18px"}, children=[
+app.index_string = app.index_string.replace("{%css%}", """{%css%}
+<style>
+  .ligne { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 5px; cursor: pointer;
+           font-size: 13px; user-select: none; white-space: nowrap; }
+  .ligne:hover { background: #e8eef7; }
+  .ligne .nom { overflow: hidden; text-overflow: ellipsis; }
+  .ligne.dossier .nom { font-weight: 600; }
+  .ligne .chevron { width: 10px; color: #666; font-size: 11px; }
+  .ligne .compte { margin-left: auto; color: #888; font-size: 11px; background: #eee; border-radius: 8px;
+                   padding: 0 6px; }
+  .ligne.fichier { font-family: ui-monospace, monospace; font-size: 12px; }
+  .ligne.actif { background: #cfe0fb; }
+</style>""")
+EXPLORATEUR = html.Div(style={"width": "290px", "flexShrink": 0, "borderRight": "1px solid #ddd",
+                               "paddingRight": "8px", "position": "sticky", "top": 0, "alignSelf": "flex-start",
+                               "maxHeight": "100vh", "overflowY": "auto"}, children=[
+    html.Div(style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"}, children=[
+        html.B("Évènements étudiés", style={"fontSize": "14px"}),
+        html.Button("⟳", id="btn-rafraichir", title="relire data/JSONS", style=STYLE_BOUTON2)]),
+    html.Div("data/JSONS — un dossier par catégorie", style={"fontSize": "11px", "color": "#888"}),
+    dcc.Input(id="filtre-arbre", type="search", placeholder="filtrer (date, note, catégorie)…", debounce=False,
+              style={"width": "100%", "boxSizing": "border-box", "padding": "4px", "margin": "6px 0"}),
+    html.Div(id="arbre"),
+])
+
+NOTES = html.Div(style=STYLE_CADRE | {"alignItems": "flex-start"}, children=[
+    html.Div(style={"flex": "2", "minWidth": "320px"}, children=[
+        html.B("Notes sur l'évènement"),
+        dcc.Textarea(id="notes", value="", placeholder="Observations, hypothèses, à vérifier…",
+                     style={"width": "100%", "height": "78px", "marginTop": "4px", "fontFamily": "inherit"})]),
+    html.Div(style={"flex": "1", "minWidth": "280px"}, children=[
+        html.B("Catégories"),
+        dcc.Dropdown(id="categories", options=[], value=[], multi=True, placeholder="aucune",
+                     style={"marginTop": "4px"}),
+        html.Div(style=STYLE_BLOC | {"marginTop": "6px"}, children=[
+            dcc.Input(id="nouvelle-cat", type="text", placeholder="nouvelle catégorie (a/b = sous-dossier)",
+                      debounce=False, style={"flex": "1", "padding": "4px"}),
+            html.Button("＋ créer", id="btn-cat", style=STYLE_BOUTON2)])]),
+])
+
+app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "10px 14px", "display": "flex",
+                             "gap": "14px"}, children=[EXPLORATEUR, html.Div(style={"flex": "1", "minWidth": 0}, children=[
     html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"}, children=[
         html.H3("MESSENGER — exploration interactive (B, PSD, orbite)", style={"margin": "4px 0 10px"}),
         html.Div(style=STYLE_BLOC, children=[
-            html.Button("💾 Sauvegarder la configuration", id="btn-sauver", style=STYLE_BOUTON2),
-            dcc.Upload(html.Button("📂 Importer une configuration", style=STYLE_BOUTON2), id="importer",
+            html.Span(id="statut-sauvegarde", style={"fontSize": "12px"}),
+            html.Button("💾 Sauver dans le projet", id="btn-sauver-projet",
+                        style=STYLE_BOUTON | {"background": "#d9f2dd"},
+                        title="écrit data/JSONS/<dates>.json (remplace la version précédente de cet évènement)"),
+            html.Button("⬇ Exporter", id="btn-sauver", style=STYLE_BOUTON2, title="télécharger le JSON"),
+            dcc.Upload(html.Button("📂 Importer", style=STYLE_BOUTON2), id="importer",
                        accept=".json,application/json"),
             dcc.Download(id="telechargement"),
         ]),
     ]),
+    NOTES,
 
     html.Div(style=STYLE_BLOC, children=[
         dcc.Dropdown(id="choix-evt", options=options_evenements(), placeholder="Évènement de events.py…",
@@ -870,7 +1057,11 @@ app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "
     dcc.Store(id="pentes-man", data=[]),
     dcc.Store(id="pente-attente"),
     dcc.Store(id="config-importee"),
-])
+    dcc.Store(id="config-brute"),
+    dcc.Store(id="fichier-courant"),
+    dcc.Store(id="dossiers-fermes", data=[]),
+    dcc.Store(id="version-jsons", data=0),
+])])
 
 
 @app.callback(Output("debut", "value"), Output("fin", "value"),
@@ -887,14 +1078,17 @@ def choisir_evenement(val):
               Output("selection", "data", allow_duplicate=True), Output("vue", "data", allow_duplicate=True),
               Output("pentes-man", "data", allow_duplicate=True),
               Output("pente-attente", "data", allow_duplicate=True),
+              Output("notes", "value", allow_duplicate=True), Output("categories", "value", allow_duplicate=True),
+              Output("fichier-courant", "data", allow_duplicate=True),
               Input("btn-charger", "n_clicks"), Input("config-importee", "data"),
               State("debut", "value"), State("fin", "value"), State("facteur", "value"), State("force", "value"),
+              State("choix-evt", "value"),
               prevent_initial_call=True)
-def bouton_charger(_, config, debut, fin, facteur, force):
+def bouton_charger(_, config, debut, fin, facteur, force, choix_evt):
     depuis_config = ctx.triggered_id == "config-importee"
     if depuis_config:
         if not config:
-            return (no_update,) * 7
+            return (no_update,) * 10
         debut, fin = config.get("debut"), config.get("fin")
         facteur = config.get("facteur")
     try:
@@ -904,19 +1098,31 @@ def bouton_charger(_, config, debut, fin, facteur, force):
         facteur = max(1.0, fmt_num(facteur, tr.FACTEUR_FENETRE))
         cle = charger(deb, fin_, facteur, bool(force))
     except (ValueError, tr.DonneesInsuffisantes) as exc:
-        return (no_update, html.Span(str(exc), style={"color": "firebrick"})) + (no_update,) * 5
+        return (no_update, html.Span(str(exc), style={"color": "firebrick"})) + (no_update,) * 8
     except Exception as exc:  # réseau, AMDA, speasy…
         return ((no_update, html.Span(f"{type(exc).__name__} : {exc}", style={"color": "firebrick"}))
-                + (no_update,) * 5)
+                + (no_update,) * 8)
     d = MEMOIRE[cle]
     texte = f"Chargé : {fmt_date(d['wd'])} → {fmt_date(d['wf'])} — " + " ; ".join(d["notes"])
     if depuis_config:
         sel, vue, pentes = config.get("selection"), config.get("vue"), config.get("pentes_manuelles") or []
         attente = config.get("pente_en_cours")
         texte = "Configuration importée. " + texte
+        notes, cats, courant = no_update, no_update, no_update   # déjà posés par appliquer_config
     else:
         sel, vue, pentes, attente = None, None, [], None
-    return cle, html.Span(texte, style={"color": "darkgreen"}), fig_b(cle, vue, sel), sel, vue, pentes, attente
+        # Nouvel évènement : si un JSON existe déjà, on en reprend les notes et catégories (pas d'écrasement
+        # involontaire à la prochaine sauvegarde) ; sinon catégorie « source/<liste> » si choisi dans events.py
+        courant = nom_fichier(deb, fin_)
+        try:
+            ancien = lire_json(courant)
+            notes, cats = ancien.get("notes") or "", ancien.get("categories") or []
+            texte += f" — notes et catégories reprises de data/JSONS/{courant}"
+        except (OSError, ValueError):
+            notes, courant = "", None
+            cats = [f"source/{choix_evt.split('|')[0]}"] if choix_evt else []
+    return (cle, html.Span(texte, style={"color": "darkgreen"}), fig_b(cle, vue, sel), sel, vue, pentes, attente,
+            notes, cats, courant)
 
 
 @app.callback(Output("selection", "data"), Output("statut-sel", "children"),
@@ -1150,22 +1356,24 @@ def resultats_psd(cle, sel, cible, reglages, pentes):
     return sortie
 
 
-@app.callback(Output("telechargement", "data"), Input("btn-sauver", "n_clicks"),
-              State("cle", "data"), State("debut", "value"), State("fin", "value"), State("facteur", "value"),
-              State("choix-evt", "value"), State("force", "value"),
-              State("selection", "data"), State("vue", "data"), State("ions", "value"), State("lissage", "value"),
-              State("ajustement", "value"), State("composante", "value"), State("fmin", "value"),
-              State("fmax", "value"), State("mode-manuel", "value"), State("pentes-man", "data"),
-              State("pente-attente", "data"), State("auto-y", "value"), prevent_initial_call=True)
-def sauvegarder(_, cle, debut, fin, facteur, choix_evt, force, sel, vue, ions, lissage, ajustement,
-                composante, fmin, fmax, mode_manuel, pentes, attente, auto_y):
+ETATS_CONFIG = [State("cle", "data"), State("debut", "value"), State("fin", "value"), State("facteur", "value"),
+                State("choix-evt", "value"), State("force", "value"),
+                State("selection", "data"), State("vue", "data"), State("ions", "value"), State("lissage", "value"),
+                State("ajustement", "value"), State("composante", "value"), State("fmin", "value"),
+                State("fmax", "value"), State("mode-manuel", "value"), State("pentes-man", "data"),
+                State("pente-attente", "data"), State("auto-y", "value"), State("notes", "value"),
+                State("categories", "value")]
+
+
+def construire_config(cle, debut, fin, facteur, choix_evt, force, sel, vue, ions, lissage, ajustement,
+                      composante, fmin, fmax, mode_manuel, pentes, attente, auto_y, notes, categories):
     """
-    Fichier JSON en deux parties :
-      - les réglages (relus par « Importer ») : intervalle, zoom, sélection, réglages PSD, pentes
-        manuelles… ;
+    Configuration JSON complète :
+      - réglages (relus à l'ouverture) : intervalle, zoom, sélection, réglages PSD, pentes manuelles,
+        notes et catégories ;
       - "resultats" : tout ce qui est affiché à l'écran, en clair (caractéristiques des PSD, fréquences
         cyclotron, pentes automatiques avec ruptures et écarts-types, pentes manuelles avec leur valeur).
-        Cette partie sert de trace ; à l'import, les résultats sont recalculés à partir des réglages.
+        Cette partie sert de trace ; à l'ouverture, les résultats sont recalculés à partir des réglages.
     """
     reglages = reglages_dict(ions, lissage, ajustement, composante, fmin, fmax)
     charge = cle in MEMOIRE
@@ -1177,11 +1385,12 @@ def sauvegarder(_, cle, debut, fin, facteur, choix_evt, force, sel, vue, ions, l
         groupe, i = choix_evt.split("|")
         e = tr.GROUPES[groupe][int(i)]
         evt = dict(groupe=groupe, indice=int(i), debut=e.start, fin=e.end)
-    config = dict(
+    return dict(
         version=VERSION_CONFIG, application="webapp.py (KH-EA-3A)",
         sauvegarde=f"{datetime.now():%Y-%m-%d %H:%M:%S}",
         evenement_events_py=evt,
         debut=debut, fin=fin, facteur=facteur,
+        notes=notes or "", categories=[c for c in (categories or []) if c],
         fenetre=[fmt_date(d["wd"]), fmt_date(d["wf"])] if charge else None,
         retelecharger_amda=bool(force),
         vue=vue, echelle_B_auto="on" in (auto_y or []), selection=sel,
@@ -1192,11 +1401,106 @@ def sauvegarder(_, cle, debut, fin, facteur, choix_evt, force, sel, vue, ions, l
             psd_fenetre=resultats_psd(cle, sel, "fen", reglages, pentes),
             psd_selection=resultats_psd(cle, sel, "sel", reglages, pentes)),
     )
+
+
+@app.callback(Output("telechargement", "data"), Input("btn-sauver", "n_clicks"), *ETATS_CONFIG,
+              prevent_initial_call=True)
+def exporter(_, *etats):
+    """« Exporter » : télécharge le JSON dans le navigateur."""
+    config = construire_config(*etats)
     try:
-        nom = f"config_{parse_date(debut):%Y-%m-%d_%H%M}.json"
+        nom = nom_fichier(parse_date(config["debut"]), parse_date(config["fin"]))
     except ValueError:
         nom = "config_webapp.json"
     return dict(content=json.dumps(config, indent=2, ensure_ascii=False), filename=nom)
+
+
+@app.callback(Output("statut-sauvegarde", "children"), Output("version-jsons", "data"),
+              Output("fichier-courant", "data"), Output("choix-evt", "options"),
+              Input("btn-sauver-projet", "n_clicks"), *ETATS_CONFIG, State("version-jsons", "data"),
+              prevent_initial_call=True)
+def sauver_projet(_, *etats):
+    """« Sauver dans le projet » : écrit (ou remplace) data/JSONS/<dates>.json."""
+    *etats, version = etats
+    config = construire_config(*etats)
+    try:
+        nom = nom_fichier(parse_date(config["debut"]), parse_date(config["fin"]))
+        DOSSIER_JSONS.mkdir(parents=True, exist_ok=True)
+        chemin_json(nom).write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        enregistrer_categories(config["categories"])
+    except (ValueError, OSError) as exc:
+        return html.Span(f"Sauvegarde impossible : {exc}", style={"color": "firebrick"}), no_update, no_update, \
+            no_update
+    return (html.Span(f"✓ data/JSONS/{nom} ({datetime.now():%H:%M:%S})", style={"color": "darkgreen"}),
+            (version or 0) + 1, nom, options_evenements())
+
+
+@app.callback(Output("categories", "options"), Output("categories", "value", allow_duplicate=True),
+              Output("nouvelle-cat", "value"), Output("version-jsons", "data", allow_duplicate=True),
+              Input("btn-cat", "n_clicks"), Input("nouvelle-cat", "n_submit"), Input("version-jsons", "data"),
+              State("nouvelle-cat", "value"), State("categories", "value"), prevent_initial_call="initial_duplicate")
+def gerer_categories(_b, _s, version, nouvelle, actuelles):
+    """Crée une catégorie à la volée (et l'ajoute à l'évènement courant) ; tient la liste à jour."""
+    actuelles = list(actuelles or [])
+    if ctx.triggered_id in ("btn-cat", "nouvelle-cat"):
+        cat = nettoyer_categorie(nouvelle)
+        if not cat:
+            return no_update, no_update, no_update, no_update
+        cats = enregistrer_categories([cat])
+        if cat not in actuelles:
+            actuelles.append(cat)
+        return [{"label": c, "value": c} for c in cats], actuelles, "", (version or 0) + 1
+    cats = sorted(set(categories_connues()) | set(actuelles))
+    return [{"label": c, "value": c} for c in cats], no_update, no_update, no_update
+
+
+@app.callback(Output("arbre", "children"),
+              Input("btn-rafraichir", "n_clicks"), Input("filtre-arbre", "value"), Input("dossiers-fermes", "data"),
+              Input("fichier-courant", "data"), Input("version-jsons", "data"))
+def afficher_arbre(_r, filtre, fermes, courant, _v):
+    return arbre(filtre, fermes, courant)
+
+
+@app.callback(Output("dossiers-fermes", "data"), Input({"type": "dossier", "chemin": ALL}, "n_clicks"),
+              State("dossiers-fermes", "data"), prevent_initial_call=True)
+def ouvrir_fermer(clics, fermes):
+    if not ctx.triggered_id or not any(t["value"] for t in ctx.triggered):
+        return no_update   # arbre redessiné, pas un clic
+    ch = ctx.triggered_id["chemin"]
+    fermes = set(fermes or [])
+    fermes ^= {ch}
+    return sorted(fermes)
+
+
+@app.callback(Output("config-brute", "data", allow_duplicate=True), Output("fichier-courant", "data"),
+              Input({"type": "fichier", "nom": ALL, "dossier": ALL}, "n_clicks"), prevent_initial_call=True)
+def ouvrir_fichier(clics):
+    """Clic sur un évènement de l'explorateur : ouvre son JSON."""
+    if not ctx.triggered_id or not any(t["value"] for t in ctx.triggered):
+        return no_update, no_update
+    nom = ctx.triggered_id["nom"]
+    try:
+        config = lire_json(nom)
+    except (OSError, ValueError) as exc:
+        return {"_erreur": f"Ouverture de {nom} impossible : {exc}"}, no_update
+    config["_source"] = f"data/JSONS/{nom}"
+    return config, nom
+
+
+@app.callback(Output("config-brute", "data"), Output("importer", "contents"),
+              Input("importer", "contents"), State("importer", "filename"), prevent_initial_call=True)
+def importer(contenu, nom_fichier_):
+    """« Importer » : JSON choisi sur l'ordinateur."""
+    if not contenu:
+        return no_update, no_update
+    try:
+        config = json.loads(base64.b64decode(contenu.split(",", 1)[1]).decode("utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("ce n'est pas une configuration de webapp.py")
+    except Exception as exc:
+        return {"_erreur": f"Import de {nom_fichier_} impossible : {exc}"}, None
+    config["_source"] = nom_fichier_
+    return config, None
 
 
 @app.callback(Output("debut", "value", allow_duplicate=True), Output("fin", "value", allow_duplicate=True),
@@ -1204,20 +1508,21 @@ def sauvegarder(_, cle, debut, fin, facteur, choix_evt, force, sel, vue, ions, l
               Output("lissage", "value"), Output("ajustement", "value"),
               Output("composante", "value"), Output("fmin", "value"), Output("fmax", "value"),
               Output("mode-manuel", "value"), Output("force", "value"), Output("auto-y", "value"),
+              Output("notes", "value"), Output("categories", "value"), Output("choix-evt", "value"),
               Output("config-importee", "data"), Output("statut", "children", allow_duplicate=True),
-              Output("importer", "contents"),
-              Input("importer", "contents"), State("importer", "filename"), prevent_initial_call=True)
-def importer(contenu, nom_fichier):
-    if not contenu:
-        return (no_update,) * 15
+              Input("config-brute", "data"), prevent_initial_call=True)
+def appliquer_config(config):
+    """Remet l'écran dans l'état d'un JSON (explorateur ou import), puis déclenche le chargement des données."""
+    if not config:
+        return (no_update,) * 17
     try:
-        config = json.loads(base64.b64decode(contenu.split(",", 1)[1]).decode("utf-8"))
-        if not isinstance(config, dict) or "debut" not in config or "fin" not in config:
+        if "_erreur" in config:
+            raise ValueError(config["_erreur"])
+        if "debut" not in config or "fin" not in config:
             raise ValueError("ce n'est pas une configuration de webapp.py")
         parse_date(config["debut"]), parse_date(config["fin"])
-    except Exception as exc:
-        return ((no_update,) * 13
-                + (html.Span(f"Import de {nom_fichier} impossible : {exc}", style={"color": "firebrick"}), None))
+    except ValueError as exc:
+        return (no_update,) * 16 + (html.Span(str(exc), style={"color": "firebrick"}),)
     p = config.get("psd") or {}
     config["_import"] = datetime.now().isoformat()  # force le rechargement même pour le même fichier
     ions = p.get("ions")
@@ -1227,7 +1532,8 @@ def importer(contenu, nom_fichier):
             p.get("fmin", FIT_FMIN), p.get("fmax", FIT_FMAX),
             ["on"] if p.get("mode_pente_manuelle") else [], ["force"] if config.get("retelecharger_amda") else [],
             [] if config.get("echelle_B_auto") is False else ["on"],
-            config, f"Import de {nom_fichier}…", None)
+            config.get("notes") or "", config.get("categories") or [], None,
+            config, f"Ouverture de {config.get('_source', 'la configuration')}…")
 
 
 if __name__ == "__main__":

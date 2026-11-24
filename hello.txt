@@ -16,3 +16,4 @@ ipython
 #lance la console IPython amelioree
 
 uv pip install dash
+#dependance pour lancer la webapp
