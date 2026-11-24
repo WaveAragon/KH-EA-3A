@@ -1,0 +1,190 @@
+{
+  "version": 4,
+  "application": "webapp.py (KH-EA-3A)",
+  "sauvegarde": "2026-11-24 14:49:18",
+  "evenement_events_py": {
+    "groupe": "Gershman_A2",
+    "indice": 4,
+    "debut": "2011-09-05 20:21",
+    "fin": "2011-09-05 20:31"
+  },
+  "debut": "2011-09-05 20:21:00",
+  "fin": "2011-09-05 20:31:00",
+  "facteur": 2.0,
+  "notes": "belles courbes B\ncreux PSD trop haute fréquence",
+  "categories": [
+    "dents de scie"
+  ],
+  "fenetre": [
+    "2011-09-05 20:16:00",
+    "2011-09-05 20:36:00"
+  ],
+  "retelecharger_amda": true,
+  "vue": null,
+  "echelle_B_auto": true,
+  "selection": [
+    "2011-09-05 20:21:00.000",
+    "2011-09-05 20:31:00.000"
+  ],
+  "psd": {
+    "ions": [
+      "H+",
+      "Na+"
+    ],
+    "lissage": 0.01,
+    "ajustement": "1",
+    "composante": "both",
+    "fmin": 0.1,
+    "fmax": 10,
+    "mode_pente_manuelle": false
+  },
+  "pentes_manuelles": [],
+  "pente_en_cours": null,
+  "resultats": {
+    "notes_donnees": [
+      "23999 échantillons"
+    ],
+    "psd_fenetre": {
+      "titre": "PSD de la fenêtre ×2 (20:16:00 → 20:36:00)",
+      "intervalle": [
+        "2011-09-05 20:16:00",
+        "2011-09-05 20:36:00"
+      ],
+      "N": 23999,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.000833368,
+      "B_moy_nT": 35.8951,
+      "B_std_nT": 7.13031,
+      "frequences_cyclotron_Hz": {
+        "H+": 0.547227,
+        "Na+": 0.0237925
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "1",
+          "nb_ruptures": 1,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.348152
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100004,
+              "f_fin_Hz": 0.348152,
+              "pente": -1.646,
+              "ecart_type": 0.0898
+            },
+            {
+              "f_debut_Hz": 0.348152,
+              "f_fin_Hz": 9.99958,
+              "pente": -2.439,
+              "ecart_type": 0.0269
+            }
+          ]
+        },
+        "P∥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "1",
+          "nb_ruptures": 1,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.396178
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100004,
+              "f_fin_Hz": 0.396178,
+              "pente": -1.436,
+              "ecart_type": 0.1
+            },
+            {
+              "f_debut_Hz": 0.396178,
+              "f_fin_Hz": 9.99958,
+              "pente": -2.441,
+              "ecart_type": 0.0357
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    },
+    "psd_selection": {
+      "titre": "PSD sélection = évènement : 2011-09-05 20:21:00 → 20:31:00 UTC (600.0 s)",
+      "intervalle": [
+        "2011-09-05 20:21:00.000",
+        "2011-09-05 20:31:00.000"
+      ],
+      "N": 11999,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.00166681,
+      "B_moy_nT": 34.1785,
+      "B_std_nT": 8.53315,
+      "frequences_cyclotron_Hz": {
+        "H+": 0.521058,
+        "Na+": 0.0226547
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "1",
+          "nb_ruptures": 1,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.211562
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100008,
+              "f_fin_Hz": 0.211562,
+              "pente": -1.095,
+              "ecart_type": 0.19
+            },
+            {
+              "f_debut_Hz": 0.211562,
+              "f_fin_Hz": 9.99917,
+              "pente": -2.49,
+              "ecart_type": 0.0249
+            }
+          ]
+        },
+        "P∥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "1",
+          "nb_ruptures": 1,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            1.69752
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100008,
+              "f_fin_Hz": 1.69752,
+              "pente": -2.031,
+              "ecart_type": 0.0458
+            },
+            {
+              "f_debut_Hz": 1.69752,
+              "f_fin_Hz": 9.99917,
+              "pente": -2.811,
+              "ecart_type": 0.0804
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    }
+  }
+}
