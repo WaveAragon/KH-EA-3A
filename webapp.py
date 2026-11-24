@@ -14,6 +14,7 @@ Lancement (depuis la racine du dépôt) :
   pip install dash            (en plus de numpy, scipy, matplotlib, speasy)
   python webapp.py            puis ouvrir http://127.0.0.1:8050
   python webapp.py --port 8051 --debug
+  python webapp.py --host 0.0.0.0   accessible depuis les autres machines (réseau local, Tailscale), sans --debug
 
 Utilisation :
   1. Choisir un évènement de events.py ou saisir début / fin ("YYYY-MM-DD HH:MM[:SS]"), puis « Charger ».
@@ -40,9 +41,15 @@ Utilisation :
      catégories, et dans "resultats" toutes les valeurs affichées (caractéristiques des PSD, fréquences
      cyclotron, pentes automatiques avec ruptures et écarts-types, pentes manuelles avec leur valeur).
      « Exporter » télécharge ce même JSON ; « Importer » en ouvre un depuis l'ordinateur.
-  7. L'explorateur à gauche liste data/JSONS par catégorie (un évènement apparaît dans chacune de ses
-     catégories) ; un clic rouvre l'évènement dans l'état sauvegardé. Le menu events.py sert à démarrer
-     l'étude d'un nouvel évènement (✓ = déjà sauvegardé ; ses notes et catégories sont alors reprises).
+  7. L'explorateur à gauche (repliable avec ⟨) liste data/JSONS, en 📁 dossiers (un par catégorie ; un évènement
+     apparaît dans chacune de ses catégories) ou en 🏷 étiquettes (puces cumulables : seuls les évènements qui les
+     ont toutes restent). Un clic rouvre l'évènement dans l'état sauvegardé ; ◀ / ▶ passent au précédent /
+     suivant de la liste affichée. Le menu events.py sert à démarrer l'étude d'un nouvel évènement (✓ = déjà
+     sauvegardé ; ses notes et catégories sont alors reprises).
+     « 🗑 retirer » enlève l'évènement ouvert de la liste : son JSON est déplacé dans data/JSONS/_corbeille/.
+     Une catégorie désuète se supprime dans le cadre « Catégories » (elle est retirée de tous les JSON).
+  8. À plusieurs : l'explorateur relit data/JSONS toutes les 10 s, et « Sauver dans le projet » refuse d'écraser
+     sans confirmation un JSON modifié par quelqu'un d'autre depuis qu'on l'a ouvert.
 """
 import argparse
 import base64
@@ -101,6 +108,8 @@ CONFIG_FIG = {"scrollZoom": True, "displaylogo": False,
 # Évènements étudiés : un JSON par évènement dans data/JSONS (nom tiré des dates), classés par étiquettes
 DOSSIER_JSONS = tr.DATA / "JSONS"
 FICHIER_CATEGORIES = DOSSIER_JSONS / "_categories.json"   # catégories créées (même vides)
+CORBEILLE = DOSSIER_JSONS / "_corbeille"   # JSON retirés de la liste (récupérables à la main)
+SONDAGE_S = 10   # relecture de data/JSONS (sauvegardes d'un camarade) toutes les SONDAGE_S secondes
 
 
 def parse_date(s):
@@ -794,6 +803,79 @@ def lister_jsons():
     return sortie
 
 
+def mtime_json(nom):
+    """Date de modification d'un JSON (None s'il n'existe pas) : sert à détecter la sauvegarde d'un camarade."""
+    try:
+        return chemin_json(nom).stat().st_mtime
+    except (OSError, ValueError):
+        return None
+
+
+def signature_jsons():
+    """Change dès qu'un JSON est créé, modifié ou supprimé (par soi ou par un camarade)."""
+    if not DOSSIER_JSONS.is_dir():
+        return ""
+    return "|".join(f"{p.name}:{p.stat().st_mtime_ns}" for p in sorted(DOSSIER_JSONS.glob("*.json")))
+
+
+def etiquettes_avec_parents(cats):
+    """« KH/flanc aube » -> {« KH », « KH/flanc aube »} : choisir « KH » montre aussi ses sous-étiquettes."""
+    sortie = set()
+    for c in cats:
+        morceaux = c.split("/")
+        sortie |= {"/".join(morceaux[:i]) for i in range(1, len(morceaux) + 1)}
+    return sortie
+
+
+def evenements_filtres(filtre, choisies=None):
+    """Évènements de data/JSONS passant le filtre texte et ayant toutes les étiquettes choisies, par date."""
+    evts = lister_jsons()
+    f = (filtre or "").strip().lower()
+    if f:
+        evts = [e for e in evts if f in " ".join([e["nom"], e["debut"], e["notes"]] + e["categories"]).lower()]
+    for c in choisies or []:
+        evts = [e for e in evts if c in etiquettes_avec_parents(e["categories"])]
+    return sorted(evts, key=lambda e: e["debut"])
+
+
+def ligne_fichier(e, dossier, courant, retrait):
+    return html.Div(
+        [html.Span("📝" if e["notes"].strip() else "📄"), html.Span(etiquette_evt(e), className="nom")],
+        id={"type": "fichier", "nom": e["nom"], "dossier": dossier}, n_clicks=0,
+        className="ligne fichier" + (" actif" if e["nom"] == courant else ""),
+        title=(" · ".join(e["categories"]) + ("\n\n" + e["notes"][:300] if e["notes"] else "")) or e["nom"],
+        style={"paddingLeft": f"{retrait}px"})
+
+
+def vue_etiquettes(filtre, choisies, courant):
+    """Navigation par étiquettes : puces cliquables (cumulatives), puis les évènements qui les ont toutes."""
+    choisies = list(choisies or [])
+    tous = evenements_filtres(filtre)
+    comptes = {}
+    for e in tous:
+        for c in etiquettes_avec_parents(e["categories"]):
+            comptes[c] = comptes.get(c, 0) + 1
+    for c in categories_connues():
+        comptes.setdefault(c, 0)
+    visibles = evenements_filtres(filtre, choisies)
+    possibles = set().union(*(etiquettes_avec_parents(e["categories"]) for e in visibles)) if visibles else set()
+    puces = [html.Span(f"{c} ({n})", id={"type": "puce", "cat": c}, n_clicks=0,
+                       className="puce" + (" choisie" if c in choisies else "")
+                       + ("" if c in choisies or c in possibles else " grise"),
+                       style={"marginLeft": f"{8 * c.count('/')}px"})
+             for c, n in sorted(comptes.items(), key=lambda kv: kv[0].lower())]
+    entete = html.Div(
+        ("Étiquettes choisies : " + " + ".join(choisies)) if choisies else "Cliquer des étiquettes pour filtrer",
+        style={"fontSize": "11px", "color": "#666", "margin": "6px 0 4px"})
+    lignes = [ligne_fichier(e, "#etiquettes", courant, 6) for e in visibles]
+    if not lignes:
+        lignes = [html.Div("Aucun évènement", style={"color": "#777", "fontSize": "13px", "padding": "6px"})]
+    return [html.Div(puces, style={"display": "flex", "flexWrap": "wrap", "gap": "4px"}), entete,
+            html.Div(f"{len(visibles)} évènement{'s' if len(visibles) > 1 else ''}",
+                     style={"fontSize": "11px", "color": "#888", "borderTop": "1px solid #eee",
+                            "paddingTop": "4px"})] + lignes
+
+
 def categories_connues():
     cats = set()
     try:
@@ -805,11 +887,51 @@ def categories_connues():
     return sorted(c for c in cats if c)
 
 
+def est_dans(cat, cible):
+    """cat vaut cible ou en est une sous-catégorie (« KH/flanc aube » est dans « KH »)."""
+    return cat == cible or cat.startswith(cible + "/")
+
+
+def evenements_avec(cible):
+    return [e for e in lister_jsons() if any(est_dans(c, cible) for c in e["categories"])]
+
+
+def supprimer_categorie(cible):
+    """
+    Retire la catégorie cible (et ses sous-catégories) de _categories.json et de tous les JSON qui la portent.
+    Renvoie les noms des JSON modifiés. Le reste de chaque JSON est réécrit tel quel.
+    """
+    modifies = []
+    for e in evenements_avec(cible):
+        p = chemin_json(e["nom"])
+        c = json.loads(p.read_text(encoding="utf-8"))
+        c["categories"] = [x for x in c.get("categories") or [] if not est_dans(str(x), cible)]
+        p.write_text(json.dumps(c, indent=2, ensure_ascii=False), encoding="utf-8")
+        modifies.append(e["nom"])
+    restantes = [x for x in categories_connues() if not est_dans(x, cible)]
+    DOSSIER_JSONS.mkdir(parents=True, exist_ok=True)
+    FICHIER_CATEGORIES.write_text(json.dumps(restantes, indent=2, ensure_ascii=False), encoding="utf-8")
+    return modifies
+
+
+def retirer_json(nom):
+    """Retire un évènement de la liste : son JSON part dans data/JSONS/_corbeille/ (horodaté), pas effacé."""
+    src = chemin_json(nom)
+    CORBEILLE.mkdir(parents=True, exist_ok=True)
+    dest = CORBEILLE / f"{src.stem}__retire_{datetime.now():%Y%m%d-%H%M%S}.json"
+    src.replace(dest)
+    return dest
+
+
 def enregistrer_categories(nouvelles):
     DOSSIER_JSONS.mkdir(parents=True, exist_ok=True)
     cats = sorted(set(categories_connues()) | {c for c in nouvelles if c})
     FICHIER_CATEGORIES.write_text(json.dumps(cats, indent=2, ensure_ascii=False), encoding="utf-8")
     return cats
+
+
+def options_categories(en_plus=()):
+    return [{"label": c, "value": c} for c in sorted(set(categories_connues()) | {c for c in en_plus if c})]
 
 
 def nettoyer_categorie(c):
@@ -862,11 +984,7 @@ def arbre(filtre, fermes, courant):
             if ouvert:
                 lignes += rendu(sous, ch, prof + 1)
         for e in sorted(noeud["_"], key=lambda e: e["debut"]):
-            lignes.append(html.Div(
-                [html.Span("📝" if e["notes"].strip() else "📄"), html.Span(etiquette_evt(e), className="nom")],
-                id={"type": "fichier", "nom": e["nom"], "dossier": chemin}, n_clicks=0,
-                className="ligne fichier" + (" actif" if e["nom"] == courant else ""),
-                title=(e["notes"][:300] or e["nom"]), style={"paddingLeft": f"{22 + 16 * prof}px"}))
+            lignes.append(ligne_fichier(e, chemin, courant, 22 + 16 * prof))
         return lignes
 
     lignes = rendu(racine, "", 0)
@@ -921,17 +1039,35 @@ app.index_string = app.index_string.replace("{%css%}", """{%css%}
                    padding: 0 6px; }
   .ligne.fichier { font-family: ui-monospace, monospace; font-size: 12px; }
   .ligne.actif { background: #cfe0fb; }
+  .puce { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #eef1f5; cursor: pointer;
+          user-select: none; border: 1px solid #d5dbe3; }
+  .puce:hover { background: #dde6f3; }
+  .puce.choisie { background: #2f6fd6; color: white; border-color: #2f6fd6; }
+  .puce.grise { opacity: 0.4; }
 </style>""")
-EXPLORATEUR = html.Div(style={"width": "290px", "flexShrink": 0, "borderRight": "1px solid #ddd",
-                               "paddingRight": "8px", "position": "sticky", "top": 0, "alignSelf": "flex-start",
-                               "maxHeight": "100vh", "overflowY": "auto"}, children=[
-    html.Div(style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"}, children=[
-        html.B("Évènements étudiés", style={"fontSize": "14px"}),
-        html.Button("⟳", id="btn-rafraichir", title="relire data/JSONS", style=STYLE_BOUTON2)]),
-    html.Div("data/JSONS — un dossier par catégorie", style={"fontSize": "11px", "color": "#888"}),
-    dcc.Input(id="filtre-arbre", type="search", placeholder="filtrer (date, note, catégorie)…", debounce=False,
-              style={"width": "100%", "boxSizing": "border-box", "padding": "4px", "margin": "6px 0"}),
-    html.Div(id="arbre"),
+STYLE_EXPLORATEUR = {"flexShrink": 0, "borderRight": "1px solid #ddd", "paddingRight": "8px",
+                     "position": "sticky", "top": 0, "alignSelf": "flex-start", "maxHeight": "100vh",
+                     "overflowY": "auto"}
+EXPLORATEUR = html.Div(id="explorateur", style=STYLE_EXPLORATEUR | {"width": "290px"}, children=[
+    html.Div(style={"display": "flex", "alignItems": "center", "gap": "4px"}, children=[
+        html.Button("⟨", id="btn-replier", title="replier / déplier l'explorateur", style=STYLE_BOUTON2),
+        html.Div(id="explorateur-titre", style={"flex": "1", "display": "flex", "alignItems": "center", "gap": "4px"},
+                 children=[html.B("Évènements étudiés", style={"fontSize": "14px", "flex": "1"}),
+                           html.Button("◀", id="btn-precedent", title="évènement précédent de la liste",
+                                       style=STYLE_BOUTON2),
+                           html.Button("▶", id="btn-suivant", title="évènement suivant de la liste",
+                                       style=STYLE_BOUTON2),
+                           html.Button("⟳", id="btn-rafraichir", title="relire data/JSONS", style=STYLE_BOUTON2)])]),
+    html.Div(id="explorateur-contenu", children=[
+        dcc.RadioItems(id="mode-arbre", value="dossiers", inline=True,
+                       options=[{"label": " 📁 dossiers ", "value": "dossiers"},
+                                {"label": " 🏷 étiquettes", "value": "etiquettes"}],
+                       style={"fontSize": "13px", "margin": "6px 0 2px"}),
+        dcc.Input(id="filtre-arbre", type="search", placeholder="filtrer (date, note, catégorie)…", debounce=False,
+                  style={"width": "100%", "boxSizing": "border-box", "padding": "4px", "margin": "4px 0 6px"}),
+        html.Div(id="arbre"),
+        html.Div(id="info-sync", style={"fontSize": "10px", "color": "#999", "marginTop": "8px"}),
+    ]),
 ])
 
 NOTES = html.Div(style=STYLE_CADRE | {"alignItems": "flex-start"}, children=[
@@ -946,122 +1082,144 @@ NOTES = html.Div(style=STYLE_CADRE | {"alignItems": "flex-start"}, children=[
         html.Div(style=STYLE_BLOC | {"marginTop": "6px"}, children=[
             dcc.Input(id="nouvelle-cat", type="text", placeholder="nouvelle catégorie (a/b = sous-dossier)",
                       debounce=False, style={"flex": "1", "padding": "4px"}),
-            html.Button("＋ créer", id="btn-cat", style=STYLE_BOUTON2)])]),
+            html.Button("＋ créer", id="btn-cat", style=STYLE_BOUTON2)]),
+        html.Div(style=STYLE_BLOC | {"marginTop": "6px"}, children=[
+            dcc.Dropdown(id="cat-a-supprimer", options=[], placeholder="catégorie désuète…", clearable=True,
+                         style={"flex": "1", "minWidth": "160px"}),
+            html.Button("🗑 supprimer", id="btn-suppr-cat", style=STYLE_BOUTON2),
+            html.Button("confirmer", id="btn-suppr-confirmer",
+                        style=STYLE_BOUTON2 | {"display": "none", "background": "#f8d0d0"})]),
+        html.Div(id="statut-cat", style={"fontSize": "12px", "marginTop": "3px"})]),
 ])
 
-app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "10px 14px", "display": "flex",
-                             "gap": "14px"}, children=[EXPLORATEUR, html.Div(style={"flex": "1", "minWidth": 0}, children=[
-    html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"}, children=[
-        html.H3("MESSENGER — exploration interactive (B, PSD, orbite)", style={"margin": "4px 0 10px"}),
-        html.Div(style=STYLE_BLOC, children=[
-            html.Span(id="statut-sauvegarde", style={"fontSize": "12px"}),
-            html.Button("💾 Sauver dans le projet", id="btn-sauver-projet",
-                        style=STYLE_BOUTON | {"background": "#d9f2dd"},
-                        title="écrit data/JSONS/<dates>.json (remplace la version précédente de cet évènement)"),
+def mise_en_page():
+    """Recalculée à chaque ouverture de la page : menu events.py (✓) et catégories reflètent data/JSONS."""
+    return html.Div(style={"fontFamily": "system-ui, sans-serif", "padding": "10px 14px", "display": "flex",
+                                 "gap": "14px"}, children=[EXPLORATEUR, html.Div(style={"flex": "1", "minWidth": 0}, children=[
+        html.Div(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"}, children=[
+            html.H3("MESSENGER — exploration interactive (B, PSD, orbite)", style={"margin": "4px 0 10px"}),
+            html.Div(style=STYLE_BLOC, children=[
+                html.Span(id="statut-sauvegarde", style={"fontSize": "12px"}),
+            html.Button("écraser quand même", id="btn-ecraser", style=STYLE_BOUTON2 | {"display": "none"}),
+                html.Button("💾 Sauver dans le projet", id="btn-sauver-projet",
+                            style=STYLE_BOUTON | {"background": "#d9f2dd"},
+                            title="écrit data/JSONS/<dates>.json (remplace la version précédente de cet évènement)"),
+                html.Button("🗑 retirer", id="btn-retirer", style=STYLE_BOUTON2,
+                        title="retirer l'évènement ouvert de la liste (JSON déplacé dans data/JSONS/_corbeille)"),
+            html.Button("confirmer le retrait", id="btn-retirer-confirmer",
+                        style=STYLE_BOUTON2 | {"display": "none", "background": "#f8d0d0"}),
             html.Button("⬇ Exporter", id="btn-sauver", style=STYLE_BOUTON2, title="télécharger le JSON"),
-            dcc.Upload(html.Button("📂 Importer", style=STYLE_BOUTON2), id="importer",
-                       accept=".json,application/json"),
-            dcc.Download(id="telechargement"),
+                dcc.Upload(html.Button("📂 Importer", style=STYLE_BOUTON2), id="importer",
+                           accept=".json,application/json"),
+                dcc.Download(id="telechargement"),
+            ]),
         ]),
-    ]),
-    NOTES,
+        NOTES,
 
-    html.Div(style=STYLE_BLOC, children=[
-        dcc.Dropdown(id="choix-evt", options=options_evenements(), placeholder="Évènement de events.py…",
-                     style={"width": "380px"}, clearable=True),
-        html.Label("début"), dcc.Input(id="debut", type="text", value="2011-05-15 09:26", style=STYLE_CHAMP,
-                                       debounce=True),
-        html.Label("fin"), dcc.Input(id="fin", type="text", value="2011-05-15 09:31", style=STYLE_CHAMP,
-                                     debounce=True),
-        html.Div(style=STYLE_FACTEUR, children=[
-            html.Label("facteur fenêtre"),
-            dcc.Input(id="facteur", type="number", value=tr.FACTEUR_FENETRE, min=1, step=0.5, style=STYLE_PETIT)]),
-        dcc.Checklist(id="force", options=[{"label": " retélécharger depuis AMDA", "value": "force"}], value=[]),
-        html.Button("Charger", id="btn-charger", style=STYLE_BOUTON),
-    ]),
-    dcc.Loading(html.Div(id="statut", style={"margin": "8px 0", "fontSize": "14px"}), type="dot"),
+        html.Div(style=STYLE_BLOC, children=[
+            dcc.Dropdown(id="choix-evt", options=options_evenements(), placeholder="Évènement de events.py…",
+                         style={"width": "380px"}, clearable=True),
+            html.Label("début"), dcc.Input(id="debut", type="text", value="2011-05-15 09:26", style=STYLE_CHAMP,
+                                           debounce=True),
+            html.Label("fin"), dcc.Input(id="fin", type="text", value="2011-05-15 09:31", style=STYLE_CHAMP,
+                                         debounce=True),
+            html.Div(style=STYLE_FACTEUR, children=[
+                html.Label("facteur fenêtre"),
+                dcc.Input(id="facteur", type="number", value=tr.FACTEUR_FENETRE, min=1, step=0.5, style=STYLE_PETIT)]),
+            dcc.Checklist(id="force", options=[{"label": " retélécharger depuis AMDA", "value": "force"}], value=[]),
+            html.Button("Charger", id="btn-charger", style=STYLE_BOUTON),
+        ]),
+        dcc.Loading(html.Div(id="statut", style={"margin": "8px 0", "fontSize": "14px"}), type="dot"),
 
-    # Réglages communs aux deux PSD
-    html.Div(style=STYLE_CADRE, children=[
-        html.B("Réglages PSD"),
-        html.Label("ions"),
-        dcc.Dropdown(id="ions", options=options_ions(), value=list(tr.IONS), multi=True,
-                     placeholder="aucune fréquence cyclotron", style={"minWidth": "330px"}),
-        html.Label("lissage (décade)"),
-        html.Div(dcc.Slider(id="lissage", min=0, max=0.5, step=0.01, value=0,
-                            marks={0: "aucun", 0.1: "0,1", 0.2: "0,2", 0.3: "0,3", 0.4: "0,4", 0.5: "0,5"},
-                            tooltip={"placement": "bottom"}), style={"width": "280px"}),
-    ]),
-    html.Div(style=STYLE_CADRE, children=[
-        html.Label("pentes auto"),
-        dcc.Dropdown(id="ajustement", value="auto", clearable=False, style={"width": "190px"},
-                     options=[{"label": "aucune", "value": "aucun"},
-                              {"label": "ruptures : auto (BIC)", "value": "auto"},
-                              {"label": "1 rupture", "value": "1"},
-                              {"label": "2 ruptures", "value": "2"},
-                              {"label": "3 ruptures", "value": "3"}]),
-        dcc.Dropdown(id="composante", value="perp", clearable=False, style={"width": "110px"},
-                     options=[{"label": "P⊥", "value": "perp"}, {"label": "P∥", "value": "para"},
-                              {"label": "P⊥ et P∥", "value": "both"}]),
-        html.Label("de"), dcc.Input(id="fmin", type="number", value=FIT_FMIN, min=0, step="any",
-                                    debounce=True, style=STYLE_PETIT),
-        html.Label("à"), dcc.Input(id="fmax", type="number", value=FIT_FMAX, min=0, step="any",
-                                   debounce=True, style=STYLE_PETIT),
-        html.Label("Hz"),
-        html.Span("|", style={"color": "#aaa"}),
-        dcc.Checklist(id="mode-manuel", options=[{"label": " pente manuelle (2 clics sur le log-log)",
-                                                  "value": "on"}], value=[]),
-        html.Button("annuler la dernière", id="btn-annuler", style=STYLE_BOUTON2),
-        html.Button("effacer", id="btn-effacer", style=STYLE_BOUTON2),
-    ]),
+        # Réglages communs aux deux PSD
+        html.Div(style=STYLE_CADRE, children=[
+            html.B("Réglages PSD"),
+            html.Label("ions"),
+            dcc.Dropdown(id="ions", options=options_ions(), value=list(tr.IONS), multi=True,
+                         placeholder="aucune fréquence cyclotron", style={"minWidth": "330px"}),
+            html.Label("lissage (décade)"),
+            html.Div(dcc.Slider(id="lissage", min=0, max=0.5, step=0.01, value=0,
+                                marks={0: "aucun", 0.1: "0,1", 0.2: "0,2", 0.3: "0,3", 0.4: "0,4", 0.5: "0,5"},
+                                tooltip={"placement": "bottom"}), style={"width": "280px"}),
+        ]),
+        html.Div(style=STYLE_CADRE, children=[
+            html.Label("pentes auto"),
+            dcc.Dropdown(id="ajustement", value="auto", clearable=False, style={"width": "190px"},
+                         options=[{"label": "aucune", "value": "aucun"},
+                                  {"label": "ruptures : auto (BIC)", "value": "auto"},
+                                  {"label": "1 rupture", "value": "1"},
+                                  {"label": "2 ruptures", "value": "2"},
+                                  {"label": "3 ruptures", "value": "3"}]),
+            dcc.Dropdown(id="composante", value="perp", clearable=False, style={"width": "110px"},
+                         options=[{"label": "P⊥", "value": "perp"}, {"label": "P∥", "value": "para"},
+                                  {"label": "P⊥ et P∥", "value": "both"}]),
+            html.Label("de"), dcc.Input(id="fmin", type="number", value=FIT_FMIN, min=0, step="any",
+                                        debounce=True, style=STYLE_PETIT),
+            html.Label("à"), dcc.Input(id="fmax", type="number", value=FIT_FMAX, min=0, step="any",
+                                       debounce=True, style=STYLE_PETIT),
+            html.Label("Hz"),
+            html.Span("|", style={"color": "#aaa"}),
+            dcc.Checklist(id="mode-manuel", options=[{"label": " pente manuelle (2 clics sur le log-log)",
+                                                      "value": "on"}], value=[]),
+            html.Button("annuler la dernière", id="btn-annuler", style=STYLE_BOUTON2),
+            html.Button("effacer", id="btn-effacer", style=STYLE_BOUTON2),
+        ]),
 
-    html.Div(style={"display": "flex", "gap": "8px"}, children=[
-        html.Div([dcc.Graph(id="fig-b", figure=fig_vide("Choisir un intervalle puis « Charger »", 620),
-                            config=CONFIG_FIG),
-                  html.Div(style=STYLE_BLOC, children=[
-                      html.Button("↺ fenêtre initiale", id="btn-recentrer",
-                                  style=STYLE_BOUTON | {"background": "rgba(31,119,180,0.15)"},
-                                  title="revenir à la fenêtre ×facteur, bornes de B recalées sur cette fenêtre"),
-                      dcc.Checklist(id="auto-y", value=["on"], style={"fontSize": "13px"},
-                                    options=[{"label": " bornes de B = min / max de la zone affichée", "value": "on"}]),
-                      html.Span("orange : évènement — violet : sélection",
-                                style={"fontSize": "12px", "color": "#555"})])],
-                 style={"flex": "2.1", "minWidth": 0}),
-        html.Div([dcc.Graph(id="fig-psd-fen", figure=fig_vide("PSD de la fenêtre", 620), config=CONFIG_FIG),
-                  html.Div(id="resume-fen", style=STYLE_RESUME)],
-                 style={"flex": "1", "minWidth": 0}),
-    ]),
+        html.Div(style={"display": "flex", "gap": "8px"}, children=[
+            html.Div([dcc.Graph(id="fig-b", figure=fig_vide("Choisir un intervalle puis « Charger »", 620),
+                                config=CONFIG_FIG),
+                      html.Div(style=STYLE_BLOC, children=[
+                          html.Button("↺ fenêtre initiale", id="btn-recentrer",
+                                      style=STYLE_BOUTON | {"background": "rgba(31,119,180,0.15)"},
+                                      title="revenir à la fenêtre ×facteur, bornes de B recalées sur cette fenêtre"),
+                          dcc.Checklist(id="auto-y", value=["on"], style={"fontSize": "13px"},
+                                        options=[{"label": " bornes de B = min / max de la zone affichée", "value": "on"}]),
+                          html.Span("orange : évènement — violet : sélection",
+                                    style={"fontSize": "12px", "color": "#555"})])],
+                     style={"flex": "2.1", "minWidth": 0}),
+            html.Div([dcc.Graph(id="fig-psd-fen", figure=fig_vide("PSD de la fenêtre", 620), config=CONFIG_FIG),
+                      html.Div(id="resume-fen", style=STYLE_RESUME)],
+                     style={"flex": "1", "minWidth": 0}),
+        ]),
 
-    html.H4("PSD d'une zone sélectionnée", style={"margin": "14px 0 6px"}),
-    html.Div("Outil « Box Select » de la barre Plotly sur les courbes de B (calcul automatique), "
-             "bornes saisies à la main, zone actuellement affichée, ou évènement seul.",
-             style={"fontSize": "13px", "color": "#555", "marginBottom": "6px"}),
-    html.Div(style=STYLE_BLOC, children=[
-        html.Label("début"), dcc.Input(id="sel-debut", type="text", style=STYLE_CHAMP | {"width": "230px"}),
-        html.Label("fin"), dcc.Input(id="sel-fin", type="text", style=STYLE_CHAMP | {"width": "230px"}),
-        html.Button("PSD sur ces bornes", id="btn-sel", style=STYLE_BOUTON),
-        html.Button("PSD de la zone affichée", id="btn-vue", style=STYLE_BOUTON),
-        html.Button("PSD de l'évènement seul", id="btn-evt", style=STYLE_BOUTON | {"background": "#ffe2c6"}),
-        html.Span(id="statut-sel", style={"fontSize": "13px"}),
-    ]),
-    dcc.Loading(dcc.Graph(id="fig-psd-sel", figure=fig_vide("Aucune zone sélectionnée", 500),
-                          config=CONFIG_FIG), type="dot"),
-    html.Div(id="resume-sel", style=STYLE_RESUME),
+        html.H4("PSD d'une zone sélectionnée", style={"margin": "14px 0 6px"}),
+        html.Div("Outil « Box Select » de la barre Plotly sur les courbes de B (calcul automatique), "
+                 "bornes saisies à la main, zone actuellement affichée, ou évènement seul.",
+                 style={"fontSize": "13px", "color": "#555", "marginBottom": "6px"}),
+        html.Div(style=STYLE_BLOC, children=[
+            html.Label("début"), dcc.Input(id="sel-debut", type="text", style=STYLE_CHAMP | {"width": "230px"}),
+            html.Label("fin"), dcc.Input(id="sel-fin", type="text", style=STYLE_CHAMP | {"width": "230px"}),
+            html.Button("PSD sur ces bornes", id="btn-sel", style=STYLE_BOUTON),
+            html.Button("PSD de la zone affichée", id="btn-vue", style=STYLE_BOUTON),
+            html.Button("PSD de l'évènement seul", id="btn-evt", style=STYLE_BOUTON | {"background": "#ffe2c6"}),
+            html.Span(id="statut-sel", style={"fontSize": "13px"}),
+        ]),
+        dcc.Loading(dcc.Graph(id="fig-psd-sel", figure=fig_vide("Aucune zone sélectionnée", 500),
+                              config=CONFIG_FIG), type="dot"),
+        html.Div(id="resume-sel", style=STYLE_RESUME),
 
-    html.H4("Orbite et position", style={"margin": "14px 0 6px"}),
-    dcc.Graph(id="fig-orbite", figure=fig_vide("", 540), config=CONFIG_FIG),
+        html.H4("Orbite et position", style={"margin": "14px 0 6px"}),
+        dcc.Graph(id="fig-orbite", figure=fig_vide("", 540), config=CONFIG_FIG),
 
-    dcc.Store(id="cle"),
-    dcc.Store(id="vue"),
-    dcc.Store(id="selection"),
-    dcc.Store(id="pentes-man", data=[]),
-    dcc.Store(id="pente-attente"),
-    dcc.Store(id="config-importee"),
-    dcc.Store(id="config-brute"),
-    dcc.Store(id="fichier-courant"),
-    dcc.Store(id="dossiers-fermes", data=[]),
-    dcc.Store(id="version-jsons", data=0),
-])])
+        dcc.Store(id="cle"),
+        dcc.Store(id="vue"),
+        dcc.Store(id="selection"),
+        dcc.Store(id="pentes-man", data=[]),
+        dcc.Store(id="pente-attente"),
+        dcc.Store(id="config-importee"),
+        dcc.Store(id="config-brute"),
+        dcc.Store(id="fichier-courant"),
+        dcc.Store(id="dossiers-fermes", data=[]),
+        dcc.Store(id="version-jsons", data=0),
+    dcc.Store(id="etiquettes-choisies", data=[]),
+    dcc.Store(id="explorateur-replie", data=False),
+    dcc.Store(id="mtime-courant"),            # date du JSON ouvert : détecte la sauvegarde d'un camarade
+    dcc.Store(id="signature-jsons"),
+    dcc.Interval(id="sondage", interval=SONDAGE_S * 1000),
+    ])])
+
+
+app.layout = mise_en_page
 
 
 @app.callback(Output("debut", "value"), Output("fin", "value"),
@@ -1080,6 +1238,8 @@ def choisir_evenement(val):
               Output("pente-attente", "data", allow_duplicate=True),
               Output("notes", "value", allow_duplicate=True), Output("categories", "value", allow_duplicate=True),
               Output("fichier-courant", "data", allow_duplicate=True),
+              Output("categories", "options", allow_duplicate=True),
+              Output("mtime-courant", "data", allow_duplicate=True),
               Input("btn-charger", "n_clicks"), Input("config-importee", "data"),
               State("debut", "value"), State("fin", "value"), State("facteur", "value"), State("force", "value"),
               State("choix-evt", "value"),
@@ -1088,7 +1248,7 @@ def bouton_charger(_, config, debut, fin, facteur, force, choix_evt):
     depuis_config = ctx.triggered_id == "config-importee"
     if depuis_config:
         if not config:
-            return (no_update,) * 10
+            return (no_update,) * 12
         debut, fin = config.get("debut"), config.get("fin")
         facteur = config.get("facteur")
     try:
@@ -1098,17 +1258,17 @@ def bouton_charger(_, config, debut, fin, facteur, force, choix_evt):
         facteur = max(1.0, fmt_num(facteur, tr.FACTEUR_FENETRE))
         cle = charger(deb, fin_, facteur, bool(force))
     except (ValueError, tr.DonneesInsuffisantes) as exc:
-        return (no_update, html.Span(str(exc), style={"color": "firebrick"})) + (no_update,) * 8
+        return (no_update, html.Span(str(exc), style={"color": "firebrick"})) + (no_update,) * 10
     except Exception as exc:  # réseau, AMDA, speasy…
         return ((no_update, html.Span(f"{type(exc).__name__} : {exc}", style={"color": "firebrick"}))
-                + (no_update,) * 8)
+                + (no_update,) * 10)
     d = MEMOIRE[cle]
     texte = f"Chargé : {fmt_date(d['wd'])} → {fmt_date(d['wf'])} — " + " ; ".join(d["notes"])
     if depuis_config:
         sel, vue, pentes = config.get("selection"), config.get("vue"), config.get("pentes_manuelles") or []
         attente = config.get("pente_en_cours")
         texte = "Configuration importée. " + texte
-        notes, cats, courant = no_update, no_update, no_update   # déjà posés par appliquer_config
+        notes, cats, courant, mtime = no_update, no_update, no_update, no_update   # posés à l'ouverture
     else:
         sel, vue, pentes, attente = None, None, [], None
         # Nouvel évènement : si un JSON existe déjà, on en reprend les notes et catégories (pas d'écrasement
@@ -1118,11 +1278,14 @@ def bouton_charger(_, config, debut, fin, facteur, force, choix_evt):
             ancien = lire_json(courant)
             notes, cats = ancien.get("notes") or "", ancien.get("categories") or []
             texte += f" — notes et catégories reprises de data/JSONS/{courant}"
+            mtime = mtime_json(courant)
         except (OSError, ValueError):
-            notes, courant = "", None
+            notes, courant, mtime = "", None, None
             cats = [f"source/{choix_evt.split('|')[0]}"] if choix_evt else []
+    # Dash retire d'un menu les valeurs absentes de ses options : on envoie les deux ensemble
+    options = no_update if cats is no_update else options_categories(cats)
     return (cle, html.Span(texte, style={"color": "darkgreen"}), fig_b(cle, vue, sel), sel, vue, pentes, attente,
-            notes, cats, courant)
+            notes, cats, courant, options, mtime)
 
 
 @app.callback(Output("selection", "data"), Output("statut-sel", "children"),
@@ -1417,30 +1580,49 @@ def exporter(_, *etats):
 
 @app.callback(Output("statut-sauvegarde", "children"), Output("version-jsons", "data"),
               Output("fichier-courant", "data"), Output("choix-evt", "options"),
-              Input("btn-sauver-projet", "n_clicks"), *ETATS_CONFIG, State("version-jsons", "data"),
+              Output("mtime-courant", "data"), Output("btn-ecraser", "style"),
+              Input("btn-sauver-projet", "n_clicks"), Input("btn-ecraser", "n_clicks"), *ETATS_CONFIG,
+              State("version-jsons", "data"), State("mtime-courant", "data"),
               prevent_initial_call=True)
-def sauver_projet(_, *etats):
-    """« Sauver dans le projet » : écrit (ou remplace) data/JSONS/<dates>.json."""
-    *etats, version = etats
+def sauver_projet(_s, _e, *etats):
+    """
+    « Sauver dans le projet » : écrit (ou remplace) data/JSONS/<dates>.json.
+    Si le fichier a changé sur le disque depuis qu'on l'a ouvert (sauvegarde d'un camarade), ou s'il existe déjà
+    alors qu'on ne l'a pas ouvert, on n'écrase pas sans confirmation (« écraser quand même »).
+    """
+    *etats, version, mtime_ouvert = etats
+    cache = STYLE_BOUTON2 | {"display": "none"}
     config = construire_config(*etats)
     try:
         nom = nom_fichier(parse_date(config["debut"]), parse_date(config["fin"]))
+        actuel = mtime_json(nom)
+        if ctx.triggered_id != "btn-ecraser" and actuel is not None and actuel != mtime_ouvert:
+            quand = datetime.fromtimestamp(actuel)
+            qui = "modifié" if mtime_ouvert is not None else "déjà présent"
+            msg = (f"⚠ data/JSONS/{nom} {qui} sur le disque ({quand:%d/%m %H:%M:%S}), sans doute par un camarade : "
+                   "rouvrir l'évènement depuis l'explorateur pour voir sa version, ou")
+            return (html.Span(msg, style={"color": "#b35c00"}), no_update, no_update, no_update, no_update,
+                    STYLE_BOUTON2 | {"background": "#ffe2c6"})
         DOSSIER_JSONS.mkdir(parents=True, exist_ok=True)
         chemin_json(nom).write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
         enregistrer_categories(config["categories"])
     except (ValueError, OSError) as exc:
-        return html.Span(f"Sauvegarde impossible : {exc}", style={"color": "firebrick"}), no_update, no_update, \
-            no_update
+        return (html.Span(f"Sauvegarde impossible : {exc}", style={"color": "firebrick"}), no_update, no_update,
+                no_update, no_update, cache)
     return (html.Span(f"✓ data/JSONS/{nom} ({datetime.now():%H:%M:%S})", style={"color": "darkgreen"}),
-            (version or 0) + 1, nom, options_evenements())
+            (version or 0) + 1, nom, options_evenements(), mtime_json(nom), cache)
 
 
 @app.callback(Output("categories", "options"), Output("categories", "value", allow_duplicate=True),
               Output("nouvelle-cat", "value"), Output("version-jsons", "data", allow_duplicate=True),
               Input("btn-cat", "n_clicks"), Input("nouvelle-cat", "n_submit"), Input("version-jsons", "data"),
-              State("nouvelle-cat", "value"), State("categories", "value"), prevent_initial_call="initial_duplicate")
-def gerer_categories(_b, _s, version, nouvelle, actuelles):
-    """Crée une catégorie à la volée (et l'ajoute à l'évènement courant) ; tient la liste à jour."""
+              Input("categories", "value"), State("nouvelle-cat", "value"),
+              prevent_initial_call="initial_duplicate")
+def gerer_categories(_b, _s, version, actuelles, nouvelle):
+    """
+    Crée une catégorie à la volée (et l'ajoute à l'évènement courant) ; tient la liste à jour, y compris avec
+    les catégories de l'évènement ouvert (sinon le menu ne les afficherait pas).
+    """
     actuelles = list(actuelles or [])
     if ctx.triggered_id in ("btn-cat", "nouvelle-cat"):
         cat = nettoyer_categorie(nouvelle)
@@ -1449,16 +1631,165 @@ def gerer_categories(_b, _s, version, nouvelle, actuelles):
         cats = enregistrer_categories([cat])
         if cat not in actuelles:
             actuelles.append(cat)
-        return [{"label": c, "value": c} for c in cats], actuelles, "", (version or 0) + 1
-    cats = sorted(set(categories_connues()) | set(actuelles))
-    return [{"label": c, "value": c} for c in cats], no_update, no_update, no_update
+        return options_categories(cats + actuelles), actuelles, "", (version or 0) + 1
+    return options_categories(actuelles), no_update, no_update, no_update
+
+
+@app.callback(Output("statut-sauvegarde", "children", allow_duplicate=True),
+              Output("btn-retirer-confirmer", "style"),
+              Input("btn-retirer", "n_clicks"), Input("fichier-courant", "data"), prevent_initial_call=True)
+def preparer_retrait(_, courant):
+    """1er clic sur « 🗑 retirer » : demande confirmation pour l'évènement ouvert."""
+    cache = STYLE_BOUTON2 | {"display": "none", "background": "#f8d0d0"}
+    if ctx.triggered_id != "btn-retirer":
+        return no_update, cache   # autre évènement ouvert : on annule une demande en cours
+    if not courant or mtime_json(courant) is None:
+        return html.Span("Aucun évènement sauvegardé n'est ouvert.", style={"color": "#b35c00"}), cache
+    return (html.Span(f"Retirer data/JSONS/{courant} de la liste ?", style={"color": "#b35c00"}),
+            cache | {"display": "inline-block"})
+
+
+@app.callback(Output("statut-sauvegarde", "children", allow_duplicate=True),
+              Output("btn-retirer-confirmer", "style", allow_duplicate=True),
+              Output("fichier-courant", "data", allow_duplicate=True),
+              Output("mtime-courant", "data", allow_duplicate=True),
+              Output("version-jsons", "data", allow_duplicate=True),
+              Output("choix-evt", "options", allow_duplicate=True),
+              Input("btn-retirer-confirmer", "n_clicks"), State("fichier-courant", "data"),
+              State("version-jsons", "data"), prevent_initial_call=True)
+def confirmer_retrait(_, courant, version):
+    """2e clic : le JSON part dans la corbeille ; l'écran reste tel quel (on peut encore le re-sauver)."""
+    cache = STYLE_BOUTON2 | {"display": "none", "background": "#f8d0d0"}
+    if not courant:
+        return no_update, cache, no_update, no_update, no_update, no_update
+    try:
+        dest = retirer_json(courant)
+    except (OSError, ValueError) as exc:
+        return (html.Span(f"Retrait impossible : {exc}", style={"color": "firebrick"}), cache,
+                no_update, no_update, no_update, no_update)
+    msg = f"✓ {courant} retiré (récupérable : data/JSONS/_corbeille/{dest.name})"
+    return html.Span(msg, style={"color": "darkgreen"}), cache, None, None, (version or 0) + 1, options_evenements()
+
+
+@app.callback(Output("cat-a-supprimer", "options"), Input("categories", "options"))
+def options_suppression(_):
+    """Toutes les catégories, y compris les dossiers parents (supprimer « KH » retire aussi « KH/… »)."""
+    return [{"label": c, "value": c} for c in sorted(etiquettes_avec_parents(categories_connues()), key=str.lower)]
+
+
+@app.callback(Output("statut-cat", "children"), Output("btn-suppr-confirmer", "style"),
+              Input("btn-suppr-cat", "n_clicks"), Input("cat-a-supprimer", "value"), prevent_initial_call=True)
+def preparer_suppression(_, cible):
+    """1er clic : annonce ce qui sera modifié et montre « confirmer »."""
+    cache = STYLE_BOUTON2 | {"display": "none", "background": "#f8d0d0"}
+    if ctx.triggered_id != "btn-suppr-cat" or not cible:
+        # menu vidé après une suppression : on laisse le message « ✓ supprimée » affiché
+        return ("" if cible else no_update), cache
+    evts = evenements_avec(cible)
+    sous = sorted(c for c in etiquettes_avec_parents(categories_connues()) if est_dans(c, cible) and c != cible)
+    msg = f"« {cible} »" + (f" et ses sous-catégories ({', '.join(sous)})" if sous else "")
+    msg += (f" {'seront retirées' if sous else 'sera retirée'} de {len(evts)} évènement{'s' if len(evts) > 1 else ''} : "
+            + ", ".join(etiquette_evt(e) for e in evts[:4]) + (" …" if len(evts) > 4 else "")) if evts \
+        else " n'est utilisée par aucun évènement"
+    return html.Span(msg + ".", style={"color": "#b35c00"}), cache | {"display": "inline-block"}
+
+
+@app.callback(Output("statut-cat", "children", allow_duplicate=True),
+              Output("btn-suppr-confirmer", "style", allow_duplicate=True),
+              Output("cat-a-supprimer", "value"),
+              Output("categories", "options", allow_duplicate=True),
+              Output("categories", "value", allow_duplicate=True),
+              Output("mtime-courant", "data", allow_duplicate=True),
+              Output("version-jsons", "data", allow_duplicate=True),
+              Output("etiquettes-choisies", "data", allow_duplicate=True),
+              Input("btn-suppr-confirmer", "n_clicks"),
+              State("cat-a-supprimer", "value"), State("categories", "value"), State("fichier-courant", "data"),
+              State("version-jsons", "data"), State("etiquettes-choisies", "data"), prevent_initial_call=True)
+def confirmer_suppression(_, cible, actuelles, courant, version, choisies):
+    """2e clic : retire la catégorie partout ; l'évènement ouvert suit sans fausse alerte de conflit."""
+    cache = STYLE_BOUTON2 | {"display": "none", "background": "#f8d0d0"}
+    if not cible:
+        return "", cache, no_update, no_update, no_update, no_update, no_update, no_update
+    try:
+        modifies = supprimer_categorie(cible)
+    except (OSError, ValueError) as exc:
+        return (html.Span(f"Suppression impossible : {exc}", style={"color": "firebrick"}), cache) + (no_update,) * 6
+    restantes = [c for c in (actuelles or []) if not est_dans(c, cible)]
+    mtime = mtime_json(courant) if courant in modifies else no_update
+    msg = f"✓ « {cible} » supprimée" + (f", retirée de {len(modifies)} JSON" if modifies else "")
+    return (html.Span(msg, style={"color": "darkgreen"}), cache, None, options_categories(restantes), restantes,
+            mtime, (version or 0) + 1, [c for c in (choisies or []) if not est_dans(c, cible)])
 
 
 @app.callback(Output("arbre", "children"),
               Input("btn-rafraichir", "n_clicks"), Input("filtre-arbre", "value"), Input("dossiers-fermes", "data"),
-              Input("fichier-courant", "data"), Input("version-jsons", "data"))
-def afficher_arbre(_r, filtre, fermes, courant, _v):
+              Input("fichier-courant", "data"), Input("version-jsons", "data"), Input("signature-jsons", "data"),
+              Input("mode-arbre", "value"), Input("etiquettes-choisies", "data"))
+def afficher_arbre(_r, filtre, fermes, courant, _v, _sig, mode, choisies):
+    if mode == "etiquettes":
+        return vue_etiquettes(filtre, choisies, courant)
     return arbre(filtre, fermes, courant)
+
+
+@app.callback(Output("signature-jsons", "data"), Output("info-sync", "children"),
+              Input("sondage", "n_intervals"), State("signature-jsons", "data"))
+def sonder_jsons(_, ancienne):
+    """Relit data/JSONS toutes les SONDAGE_S s : l'explorateur montre les sauvegardes d'un camarade."""
+    sig = signature_jsons()
+    info = f"data/JSONS relu à {datetime.now():%H:%M:%S}"
+    return (no_update if sig == ancienne else sig), info
+
+
+@app.callback(Output("etiquettes-choisies", "data"), Input({"type": "puce", "cat": ALL}, "n_clicks"),
+              State("etiquettes-choisies", "data"), prevent_initial_call=True)
+def choisir_etiquette(_, choisies):
+    if not ctx.triggered_id or not any(t["value"] for t in ctx.triggered):
+        return no_update
+    c = ctx.triggered_id["cat"]
+    choisies = list(choisies or [])
+    return [x for x in choisies if x != c] if c in choisies else choisies + [c]
+
+
+@app.callback(Output("explorateur", "style"), Output("explorateur-contenu", "style"),
+              Output("explorateur-titre", "style"), Output("btn-replier", "children"),
+              Output("explorateur-replie", "data"),
+              Input("btn-replier", "n_clicks"), State("explorateur-replie", "data"), prevent_initial_call=True)
+def replier(_, replie):
+    replie = not replie
+    titre = {"flex": "1", "display": "flex", "alignItems": "center", "gap": "4px"}
+    if replie:
+        return (STYLE_EXPLORATEUR | {"width": "34px", "overflowY": "hidden"}, {"display": "none"},
+                titre | {"display": "none"}, "⟩", True)
+    return STYLE_EXPLORATEUR | {"width": "290px"}, {}, titre, "⟨", False
+
+
+# Plotly ne suit que les redimensionnements de la fenêtre : après repli / dépli, on en simule un pour que les
+# graphiques occupent la place libérée
+app.clientside_callback(
+    """function(replie) { setTimeout(() => window.dispatchEvent(new Event('resize')), 50); return ''; }""",
+    Output("explorateur-titre", "title"), Input("explorateur-replie", "data"), prevent_initial_call=True)
+
+
+@app.callback(Output("config-brute", "data", allow_duplicate=True),
+              Output("fichier-courant", "data", allow_duplicate=True),
+              Output("mtime-courant", "data", allow_duplicate=True),
+              Input("btn-precedent", "n_clicks"), Input("btn-suivant", "n_clicks"),
+              State("mode-arbre", "value"), State("filtre-arbre", "value"), State("etiquettes-choisies", "data"),
+              State("fichier-courant", "data"), prevent_initial_call=True)
+def naviguer(_p, _s, mode, filtre, choisies, courant):
+    """◀ / ▶ : évènement précédent / suivant (par date) parmi ceux que montre l'explorateur."""
+    evts = evenements_filtres(filtre, choisies if mode == "etiquettes" else None)
+    if not evts:
+        return no_update, no_update, no_update
+    noms = [e["nom"] for e in evts]
+    pas = -1 if ctx.triggered_id == "btn-precedent" else 1
+    if courant in noms:
+        i = noms.index(courant) + pas
+        if not 0 <= i < len(noms):
+            return no_update, no_update, no_update
+    else:
+        i = 0 if pas > 0 else len(noms) - 1
+    return ouvrir(noms[i])
 
 
 @app.callback(Output("dossiers-fermes", "data"), Input({"type": "dossier", "chemin": ALL}, "n_clicks"),
@@ -1472,19 +1803,25 @@ def ouvrir_fermer(clics, fermes):
     return sorted(fermes)
 
 
-@app.callback(Output("config-brute", "data", allow_duplicate=True), Output("fichier-courant", "data"),
+def ouvrir(nom):
+    """JSON de data/JSONS -> (config à appliquer, fichier courant, date de modification)."""
+    try:
+        config = lire_json(nom)
+    except (OSError, ValueError) as exc:
+        return {"_erreur": f"Ouverture de {nom} impossible : {exc}"}, no_update, no_update
+    config["_source"] = f"data/JSONS/{nom}"
+    return config, nom, mtime_json(nom)
+
+
+@app.callback(Output("config-brute", "data", allow_duplicate=True),
+              Output("fichier-courant", "data", allow_duplicate=True),
+              Output("mtime-courant", "data", allow_duplicate=True),
               Input({"type": "fichier", "nom": ALL, "dossier": ALL}, "n_clicks"), prevent_initial_call=True)
 def ouvrir_fichier(clics):
     """Clic sur un évènement de l'explorateur : ouvre son JSON."""
     if not ctx.triggered_id or not any(t["value"] for t in ctx.triggered):
-        return no_update, no_update
-    nom = ctx.triggered_id["nom"]
-    try:
-        config = lire_json(nom)
-    except (OSError, ValueError) as exc:
-        return {"_erreur": f"Ouverture de {nom} impossible : {exc}"}, no_update
-    config["_source"] = f"data/JSONS/{nom}"
-    return config, nom
+        return no_update, no_update, no_update
+    return ouvrir(ctx.triggered_id["nom"])
 
 
 @app.callback(Output("config-brute", "data"), Output("importer", "contents"),
@@ -1510,11 +1847,12 @@ def importer(contenu, nom_fichier_):
               Output("mode-manuel", "value"), Output("force", "value"), Output("auto-y", "value"),
               Output("notes", "value"), Output("categories", "value"), Output("choix-evt", "value"),
               Output("config-importee", "data"), Output("statut", "children", allow_duplicate=True),
+              Output("categories", "options", allow_duplicate=True),
               Input("config-brute", "data"), prevent_initial_call=True)
 def appliquer_config(config):
     """Remet l'écran dans l'état d'un JSON (explorateur ou import), puis déclenche le chargement des données."""
     if not config:
-        return (no_update,) * 17
+        return (no_update,) * 18
     try:
         if "_erreur" in config:
             raise ValueError(config["_erreur"])
@@ -1522,7 +1860,7 @@ def appliquer_config(config):
             raise ValueError("ce n'est pas une configuration de webapp.py")
         parse_date(config["debut"]), parse_date(config["fin"])
     except ValueError as exc:
-        return (no_update,) * 16 + (html.Span(str(exc), style={"color": "firebrick"}),)
+        return (no_update,) * 16 + (html.Span(str(exc), style={"color": "firebrick"}), no_update)
     p = config.get("psd") or {}
     config["_import"] = datetime.now().isoformat()  # force le rechargement même pour le même fichier
     ions = p.get("ions")
@@ -1533,13 +1871,18 @@ def appliquer_config(config):
             ["on"] if p.get("mode_pente_manuelle") else [], ["force"] if config.get("retelecharger_amda") else [],
             [] if config.get("echelle_B_auto") is False else ["on"],
             config.get("notes") or "", config.get("categories") or [], None,
-            config, f"Ouverture de {config.get('_source', 'la configuration')}…")
+            config, f"Ouverture de {config.get('_source', 'la configuration')}…",
+            options_categories(config.get("categories") or []))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Webapp d'exploration des données MESSENGER")
     ap.add_argument("--port", type=int, default=8050)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="0.0.0.0 pour ouvrir l'application aux autres machines (réseau local, Tailscale)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
-    print(f"Ouvrir http://127.0.0.1:{args.port}")
-    app.run(debug=args.debug, port=args.port)
+    print(f"Ouvrir http://127.0.0.1:{args.port}" + ("  (accessible aux autres machines)" if args.host != "127.0.0.1" else ""))
+    if args.host != "127.0.0.1" and args.debug:
+        ap.error("--debug est interdit avec --host : le débogueur permettrait d'exécuter du code à distance")
+    app.run(debug=args.debug, port=args.port, host=args.host)
