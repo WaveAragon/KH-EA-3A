@@ -1,0 +1,91 @@
+{
+  "version": 4,
+  "application": "webapp.py (KH-EA-3A)",
+  "sauvegarde": "2026-11-24 14:39:05",
+  "evenement_events_py": {
+    "groupe": "Gershman_A2",
+    "indice": 22,
+    "debut": "2012-11-17 22:58",
+    "fin": "2012-11-17 23:12"
+  },
+  "debut": "2012-11-17 22:58:00",
+  "fin": "2012-11-17 23:12:00",
+  "facteur": 2.0,
+  "notes": "",
+  "categories": [
+    "cassureH"
+  ],
+  "fenetre": [
+    "2012-11-17 22:51:00",
+    "2012-11-17 23:19:00"
+  ],
+  "retelecharger_amda": false,
+  "vue": null,
+  "echelle_B_auto": true,
+  "selection": null,
+  "psd": {
+    "ions": [
+      "Na+",
+      "H+"
+    ],
+    "lissage": 0.05,
+    "ajustement": "1",
+    "composante": "perp",
+    "fmin": 0.1,
+    "fmax": 10,
+    "mode_pente_manuelle": false
+  },
+  "pentes_manuelles": [],
+  "pente_en_cours": null,
+  "resultats": {
+    "notes_donnees": [
+      "33598 échantillons"
+    ],
+    "psd_fenetre": {
+      "titre": "PSD de la fenêtre ×2 (22:51:00 → 23:19:00)",
+      "intervalle": [
+        "2012-11-17 22:51:00",
+        "2012-11-17 23:19:00"
+      ],
+      "N": 33598,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.000595274,
+      "B_moy_nT": 37.4592,
+      "B_std_nT": 10.2785,
+      "frequences_cyclotron_Hz": {
+        "Na+": 0.0248293,
+        "H+": 0.571073
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "1",
+          "nb_ruptures": 1,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.550342
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100006,
+              "f_fin_Hz": 0.550342,
+              "pente": -1.298,
+              "ecart_type": 0.0605
+            },
+            {
+              "f_debut_Hz": 0.550342,
+              "f_fin_Hz": 10.0,
+              "pente": -2.507,
+              "ecart_type": 0.0319
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    },
+    "psd_selection": null
+  }
+}

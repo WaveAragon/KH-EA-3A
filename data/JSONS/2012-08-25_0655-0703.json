@@ -1,0 +1,152 @@
+{
+  "version": 4,
+  "application": "webapp.py (KH-EA-3A)",
+  "sauvegarde": "2026-11-24 14:55:02",
+  "evenement_events_py": {
+    "groupe": "Gershman_A2",
+    "indice": 20,
+    "debut": "2012-08-22 14:40",
+    "fin": "2012-08-22 14:51"
+  },
+  "debut": "2012-08-25 06:55:00",
+  "fin": "2012-08-25 07:03:00",
+  "facteur": 2.0,
+  "notes": "Pic Na clair pour le PSD restreint, et H+ entre les deux cassures de pente",
+  "categories": [
+    "picNa"
+  ],
+  "fenetre": [
+    "2012-08-25 06:51:00",
+    "2012-08-25 07:07:00"
+  ],
+  "retelecharger_amda": false,
+  "vue": null,
+  "echelle_B_auto": true,
+  "selection": [
+    "2012-08-25 06:55:00.000",
+    "2012-08-25 07:03:00.000"
+  ],
+  "psd": {
+    "ions": [
+      "H+",
+      "Na+"
+    ],
+    "lissage": 0.05,
+    "ajustement": "2",
+    "composante": "perp",
+    "fmin": 0.1,
+    "fmax": 10,
+    "mode_pente_manuelle": false
+  },
+  "pentes_manuelles": [],
+  "pente_en_cours": null,
+  "resultats": {
+    "notes_donnees": [
+      "19199 échantillons"
+    ],
+    "psd_fenetre": {
+      "titre": "PSD de la fenêtre ×2 (06:51:00 → 07:07:00)",
+      "intervalle": [
+        "2012-08-25 06:51:00",
+        "2012-08-25 07:07:00"
+      ],
+      "N": 19199,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.00104172,
+      "B_moy_nT": 64.7617,
+      "B_std_nT": 12.5628,
+      "frequences_cyclotron_Hz": {
+        "H+": 0.987304,
+        "Na+": 0.0429262
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "2",
+          "nb_ruptures": 2,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.468405,
+            2.66378
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100005,
+              "f_fin_Hz": 0.468405,
+              "pente": -1.664,
+              "ecart_type": 0.0744
+            },
+            {
+              "f_debut_Hz": 0.468405,
+              "f_fin_Hz": 2.66378,
+              "pente": -2.115,
+              "ecart_type": 0.0545
+            },
+            {
+              "f_debut_Hz": 2.66378,
+              "f_fin_Hz": 9.99948,
+              "pente": -2.365,
+              "ecart_type": 0.0912
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    },
+    "psd_selection": {
+      "titre": "PSD sélection = évènement : 2012-08-25 06:55:00 → 07:03:00 UTC (480.0 s)",
+      "intervalle": [
+        "2012-08-25 06:55:00.000",
+        "2012-08-25 07:03:00.000"
+      ],
+      "N": 9600,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.00208333,
+      "B_moy_nT": 72.7819,
+      "B_std_nT": 9.5577,
+      "frequences_cyclotron_Hz": {
+        "H+": 1.10957,
+        "Na+": 0.0482423
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "2",
+          "nb_ruptures": 2,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.16788,
+            2.66312
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.1,
+              "f_fin_Hz": 0.16788,
+              "pente": -1.031,
+              "ecart_type": 0.36
+            },
+            {
+              "f_debut_Hz": 0.16788,
+              "f_fin_Hz": 2.66312,
+              "pente": -1.922,
+              "ecart_type": 0.04
+            },
+            {
+              "f_debut_Hz": 2.66312,
+              "f_fin_Hz": 10.0,
+              "pente": -2.347,
+              "ecart_type": 0.103
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    }
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "version": 4,
+  "application": "webapp.py (KH-EA-3A)",
+  "sauvegarde": "2026-11-24 14:37:02",
+  "evenement_events_py": {
+    "groupe": "Gershman_A2",
+    "indice": 30,
+    "debut": "2013-02-16 07:38",
+    "fin": "2013-02-16 07:45"
+  },
+  "debut": "2013-02-16 07:38:00",
+  "fin": "2013-02-16 07:45:00",
+  "facteur": 2.0,
+  "notes": "Pic de Na+ bien marqué pour la composante perpendiculaire, mais la composante parallèle n'a de pic que si on prend la fenêtre étendue.\nCassure de pente pile à la fréquence H+",
+  "categories": [
+    "picNa"
+  ],
+  "fenetre": [
+    "2013-02-16 07:34:30",
+    "2013-02-16 07:48:30"
+  ],
+  "retelecharger_amda": false,
+  "vue": null,
+  "echelle_B_auto": true,
+  "selection": [
+    "2013-02-16 07:38:00.000",
+    "2013-02-16 07:45:00.000"
+  ],
+  "psd": {
+    "ions": [
+      "Na+",
+      "H+"
+    ],
+    "lissage": 0.05,
+    "ajustement": "2",
+    "composante": "perp",
+    "fmin": 0.1,
+    "fmax": 10,
+    "mode_pente_manuelle": false
+  },
+  "pentes_manuelles": [],
+  "pente_en_cours": null,
+  "resultats": {
+    "notes_donnees": [
+      "16799 échantillons"
+    ],
+    "psd_fenetre": {
+      "titre": "PSD de la fenêtre ×2 (07:34:30 → 07:48:30)",
+      "intervalle": [
+        "2013-02-16 07:34:30",
+        "2013-02-16 07:48:30"
+      ],
+      "N": 16799,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.00119055,
+      "B_moy_nT": 80.8741,
+      "B_std_nT": 12.3216,
+      "frequences_cyclotron_Hz": {
+        "Na+": 0.0536061,
+        "H+": 1.23294
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "2",
+          "nb_ruptures": 2,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.167888,
+            1.26896
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100006,
+              "f_fin_Hz": 0.167888,
+              "pente": -1.116,
+              "ecart_type": 0.197
+            },
+            {
+              "f_debut_Hz": 0.167888,
+              "f_fin_Hz": 1.26896,
+              "pente": -1.907,
+              "ecart_type": 0.0298
+            },
+            {
+              "f_debut_Hz": 1.26896,
+              "f_fin_Hz": 9.9994,
+              "pente": -2.44,
+              "ecart_type": 0.0312
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    },
+    "psd_selection": {
+      "titre": "PSD sélection = évènement : 2013-02-16 07:38:00 → 07:45:00 UTC (420.0 s)",
+      "intervalle": [
+        "2013-02-16 07:38:00.000",
+        "2013-02-16 07:45:00.000"
+      ],
+      "N": 8399,
+      "fs_Hz": 20.0,
+      "delta_f_Hz": 0.00238124,
+      "B_moy_nT": 79.1924,
+      "B_std_nT": 11.1721,
+      "frequences_cyclotron_Hz": {
+        "Na+": 0.0524914,
+        "H+": 1.2073
+      },
+      "pentes_auto": {
+        "P⊥": {
+          "plage_Hz": [
+            0.1,
+            10.0
+          ],
+          "mode": "2",
+          "nb_ruptures": 2,
+          "choix_nb_ruptures": "imposé",
+          "ruptures_Hz": [
+            0.364029,
+            1.33513
+          ],
+          "segments": [
+            {
+              "f_debut_Hz": 0.100012,
+              "f_fin_Hz": 0.364029,
+              "pente": -1.674,
+              "ecart_type": 0.0671
+            },
+            {
+              "f_debut_Hz": 0.364029,
+              "f_fin_Hz": 1.33513,
+              "pente": -1.945,
+              "ecart_type": 0.0508
+            },
+            {
+              "f_debut_Hz": 1.33513,
+              "f_fin_Hz": 9.99881,
+              "pente": -2.467,
+              "ecart_type": 0.0368
+            }
+          ]
+        }
+      },
+      "pentes_manuelles": []
+    }
+  }
+}
